@@ -43,9 +43,10 @@ def enrich_otx(ioc: str) -> dict:
             "OTX_Pulse_Count": data.get("pulse_info", {}).get("count", 0),
             "OTX_Malicious": bool(data.get("pulse_info", {}).get("count", 0)),
             "OTX_Tags": ", ".join(set(pulse_tags)) if pulse_tags else "-",
+            "OTX_Country": data.get("country_name", "-"),
         }
     except:
-        return {"OTX_Pulse_Count": "-", "OTX_Malicious": "-", "OTX_Tags": "-"}
+        return {"OTX_Pulse_Count": "-", "OTX_Malicious": "-", "OTX_Tags": "-", "OTX_Country": "-"}
 
 # Enrich with VirusTotal
 def enrich_vt(ioc: str) -> dict:
@@ -95,3 +96,26 @@ def enrich_greynoise(ioc: str) -> dict:
         }
     except:
         return {"GN_Classification": "error", "GN_Name": "-", "GN_Tags": "-"}
+
+# Enrich with IPinfo
+def enrich_ipinfo(ioc: str) -> dict:
+    if detect_type(ioc) != "IP":
+        return {"IP_Country": "-", "IP_ASN": "-"}
+    
+    try:
+        # IPinfo token is optional for basic lookups
+        ipinfo_key = keys.get("ipinfo")
+        headers = {}
+        if ipinfo_key:
+            headers["Authorization"] = f"Bearer {ipinfo_key}"
+
+        url = f"https://ipinfo.io/{ioc}/json"
+        resp = requests.get(url, headers=headers, timeout=10)
+        data = resp.json()
+        
+        return {
+            "IP_Country": data.get("country", "-"),
+            "IP_ASN": data.get("org", "-"),
+        }
+    except:
+        return {"IP_Country": "-", "IP_ASN": "-"}

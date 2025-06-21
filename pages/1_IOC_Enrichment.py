@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-from utils.api_clients import detect_type, enrich_otx, enrich_vt
-from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise
+import pydeck as pdk
+from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise, enrich_ipinfo
 from concurrent.futures import ThreadPoolExecutor
 import plotly.graph_objects as go
 
@@ -68,87 +68,150 @@ def render_donut_chart(df, count_col, label_col, title, color_scheme='blues', co
     
     return fig
 
+# --- DATA LOADING ---
+@st.cache_data
+def load_country_data():
+    """Loads and caches the country coordinate data."""
+    try:
+        df = pd.read_csv('static/country-coord.csv')
+        df['Alpha-2 code'] = df['Alpha-2 code'].str.strip()
+        df['Alpha-3 code'] = df['Alpha-3 code'].str.strip()
+        return df
+    except FileNotFoundError:
+        st.error("Error: `static/country-coord.csv` not found. Geolocation features will be limited.")
+        return None
+
+country_coords = load_country_data()
+
+# --- SESSION STATE ---
+if 'results_df' not in st.session_state:
+    st.session_state.results_df = None
+if 'user_input' not in st.session_state:
+    st.session_state.user_input = ""
+
+# --- MAIN APP ---
+
 st.title("🔬 IOC Enrichment Engine")
 st.markdown("Paste IOCs below or upload a CSV file to enrich them with threat intelligence data.")
 
 # --- INPUT ---
-ioc_input = st.text_area("Enter IOCs", height=150, placeholder="Enter one IOC per line (IPs, domains, hashes)")
+ioc_input_area = st.text_area(
+    "Enter IOCs",
+    value=st.session_state.user_input,
+    height=150,
+    placeholder="Enter one IOC per line (IPs, domains, hashes)",
+    key="ioc_text_area"
+)
 uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
-ioc_list = []
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    ioc_list = df.iloc[:, 0].dropna().astype(str).tolist()
-elif ioc_input:
-    ioc_list = list(set(i.strip() for i in ioc_input.splitlines() if i.strip()))
-
-if st.button("🧠 Enrich IOCs") and ioc_list:
-    st.info(f"Enriching {len(ioc_list)} IOCs via OTX & VirusTotal...")
+# --- PROCESSING & ENRICHMENT ---
+if st.button("🧠 Enrich IOCs"):
+    ioc_list = []
     
-    results = []
-
-    def enrich(ioc):
-        result = {
-            "IOC": ioc,
-            "Type": detect_type(ioc),
-        }
-        result.update(enrich_otx(ioc))
-        result.update(enrich_vt(ioc))
-        result.update(enrich_greynoise(ioc))
-        return result
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        enriched = list(executor.map(enrich, ioc_list))
-
-    # Create a more user-friendly DataFrame with better column names
-    df_results = pd.DataFrame(enriched)
+    # Determine IOCs from input
+    if uploaded_file:
+        try:
+            df = pd.read_csv(uploaded_file)
+            ioc_list = df.iloc[:, 0].dropna().astype(str).tolist()
+            st.session_state.user_input = "\n".join(ioc_list)
+            # Rerun to update the text area with the content of the uploaded file
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error reading CSV file: {e}")
+            ioc_list = [] # Ensure list is empty on error
+            
+    elif ioc_input_area:
+        ioc_list = list(set(i.strip() for i in ioc_input_area.splitlines() if i.strip()))
+        st.session_state.user_input = ioc_input_area
     
-    # Rename columns for better display
-    column_mapping = {
-        'IOC': 'Indicator',
-        'Type': 'Type',
-        'OTX_Pulse_Count': 'OTX Pulse Count',
-        'OTX_Malicious': 'OTX Malicious',
-        'OTX_Tags': 'OTX Tags',
-        'VT_Malicious': 'VT Malicious',
-        'VT_Suspicious': 'VT Suspicious',
-        'VT_Tags': 'VT Tags',
-        'GN_Classification': 'GN Classification',
-        'GN_Name': 'GN Name',
-        'GN_Tags': 'GN Tags'
-    }
-    
-    df_display = df_results.rename(columns=column_mapping)
-    
-    # Add severity column based on threat indicators
-    def calculate_severity(row):
-        otx_malicious = row['OTX Malicious'] if row['OTX Malicious'] != '-' else False
-        vt_malicious = row['VT Malicious'] if row['VT Malicious'] != '-' else 0
-        vt_suspicious = row['VT Suspicious'] if row['VT Suspicious'] != '-' else 0
-        gn_class = row.get('GN Classification', 'unknown').lower()
+    # If we have IOCs, enrich them
+    if ioc_list:
+        with st.spinner(f"Enriching {len(ioc_list)} IOCs... This may take a moment."):
+            results = []
 
-        if otx_malicious or vt_malicious > 5 or gn_class == 'malicious':
-            return "High"
-        elif vt_malicious > 0 or vt_suspicious > 0 or gn_class == 'benign':
-            return "Medium"
-        else:
-            return "Low"
+            def enrich(ioc):
+                result = {
+                    "IOC": ioc,
+                    "Type": detect_type(ioc),
+                }
+                result.update(enrich_otx(ioc))
+                result.update(enrich_vt(ioc))
+                result.update(enrich_greynoise(ioc))
+                result.update(enrich_ipinfo(ioc))
+                return result
 
-    
-    df_display['Threat Level'] = df_display.apply(calculate_severity, axis=1)
-    
-    # Reorder columns for better presentation
-    column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
-    df_display = df_display[column_order]
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                enriched = list(executor.map(enrich, ioc_list))
 
-    # Add pivot links
-    df_display['VT'] = df_display.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['Indicator']}", axis=1)
-    df_display['OTX'] = df_display.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['Indicator']}", axis=1)
-    df_display['GN'] = df_display.apply(
-        lambda row: f"https://www.greynoise.io/viz/ip/{row['Indicator']}" if 'ip' in row['Type'].lower() else None,
-        axis=1
-    )
+            # Create a more user-friendly DataFrame with better column names
+            df_results = pd.DataFrame(enriched)
+            
+            # Rename columns for better display
+            column_mapping = {
+                'IOC': 'Indicator',
+                'Type': 'Type',
+                'OTX_Pulse_Count': 'OTX Pulse Count',
+                'OTX_Malicious': 'OTX Malicious',
+                'OTX_Tags': 'OTX Tags',
+                'OTX_Country': 'OTX Country',
+                'VT_Malicious': 'VT Malicious',
+                'VT_Suspicious': 'VT Suspicious',
+                'VT_Tags': 'VT Tags',
+                'GN_Classification': 'GN Classification',
+                'GN_Name': 'GN Name',
+                'GN_Tags': 'GN Tags',
+                'IP_Country': 'Country Code', # Will be replaced by full name
+                'IP_ASN': 'ASN'
+            }
+            
+            df_display = df_results.rename(columns=column_mapping)
+            
+            # Map country codes to names and ISO-3 codes
+            if country_coords is not None:
+                country_map = country_coords.set_index('Alpha-2 code')['Country'].to_dict()
+                iso3_map = country_coords.set_index('Alpha-2 code')['Alpha-3 code'].to_dict()
+                df_display['Country'] = df_display['Country Code'].map(country_map).fillna('-')
+                df_display['Country ISO3'] = df_display['Country Code'].map(iso3_map).fillna('-')
+            else:
+                df_display['Country'] = df_display['Country Code'] # Fallback
+                df_display['Country ISO3'] = df_display['Country Code'] # Fallback
+                
+            # Add severity column based on threat indicators
+            def calculate_severity(row):
+                otx_malicious = row['OTX Malicious'] if row['OTX Malicious'] != '-' else False
+                vt_malicious = row['VT Malicious'] if row['VT Malicious'] != '-' else 0
+                vt_suspicious = row['VT Suspicious'] if row['VT Suspicious'] != '-' else 0
+                gn_class = row.get('GN Classification', 'unknown').lower()
+
+                if otx_malicious or vt_malicious > 5 or gn_class == 'malicious':
+                    return "High"
+                elif vt_malicious > 0 or vt_suspicious > 0 or gn_class == 'benign':
+                    return "Medium"
+                else:
+                    return "Low"
+            
+            df_display['Threat Level'] = df_display.apply(calculate_severity, axis=1)
+            
+            # Add pivot links
+            df_display['VT'] = df_display.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['Indicator']}", axis=1)
+            df_display['OTX'] = df_display.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['Indicator']}", axis=1)
+            df_display['GN'] = df_display.apply(
+                lambda row: f"https://www.greynoise.io/viz/ip/{row['Indicator']}" if 'ip' in row['Type'].lower() else None,
+                axis=1
+            )
+            
+            st.session_state.results_df = df_display
+            
+    else:
+        # Clear previous results if button is clicked with no new input
+        st.session_state.results_df = None
+        st.warning("Please paste IOCs or upload a CSV file to begin enrichment.")
+
+
+# --- DISPLAY RESULTS ---
+if st.session_state.results_df is not None:
+    df_display = st.session_state.results_df
     
     # Summary statistics - Stock Market Theme
     total_iocs = len(df_display)
@@ -372,43 +435,110 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
     else:
         st.info("No tags found in the enriched data. This could be due to limited threat intelligence data for the provided IOCs.")
 
+    # Geolocation Analysis
+    st.subheader("🌍 Geolocation")
+    geo_df = df_display[(df_display['Country ISO3'] != '-') & (df_display['Type'] == 'IP')].copy()
+
+    if not geo_df.empty and country_coords is not None:
+        # Get counts for each country
+        country_counts = geo_df.groupby(['Country', 'Country ISO3']).size().reset_index(name='count')
+
+        # Get coordinates from the lookup table
+        country_coords_subset = country_coords[['Alpha-3 code', 'Latitude (average)', 'Longitude (average)']].copy()
+        country_coords_subset.rename(columns={
+            'Alpha-3 code': 'Country ISO3',
+            'Latitude (average)': 'lat',
+            'Longitude (average)': 'lon'
+        }, inplace=True)
+        
+        # Merge counts with coordinates
+        map_data = pd.merge(country_counts, country_coords_subset, on='Country ISO3')
+        
+        if not map_data.empty:
+            # Configure pydeck layer for bubble map
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=map_data,
+                get_position='[lon, lat]',
+                get_color='[255, 69, 0, 160]',  # Orangered with some transparency
+                get_radius='count * 20000 + 10000', # Scale radius by count, with a base size
+                pickable=True,
+                radius_min_pixels=5,
+                radius_max_pixels=60,
+            )
+
+            # Configure pydeck view
+            view_state = pdk.ViewState(
+                latitude=0, 
+                longitude=0,
+                zoom=0.5,
+                pitch=0,
+            )
+            
+            # Tooltip configuration
+            tooltip = {
+                "html": "<b>{Country}</b><br/><b>IOCs:</b> {count}",
+                "style": {
+                    "backgroundColor": "steelblue",
+                    "color": "white",
+                    "border-radius": "5px",
+                    "padding": "5px"
+                }
+            }
+
+            # Render the pydeck map in dark mode
+            st.pydeck_chart(pdk.Deck(
+                map_provider='carto',
+                map_style='dark',
+                initial_view_state=view_state,
+                layers=[layer],
+                tooltip=tooltip
+            ))
+        else:
+            st.info("Could not map geolocation data to coordinates.")
+
+    else:
+        st.info("No geolocation data available for the provided IOCs (IP addresses).")
+
     # Display results with better formatting
     st.subheader("Enrichment Results")
     
-    # Create tooltips for each column
-    tooltips = {
-        'Indicator': 'The original IOC (IP, domain, or hash)',
-        'Type': 'Automatically detected type of the indicator',
-        'Threat Level': 'Overall threat assessment based on all sources',
-        'OTX Pulse Count': 'Number of threat intelligence reports in AlienVault OTX',
-        'OTX Malicious': 'Whether this IOC is flagged as malicious in OTX',
-        'OTX Tags': 'Tags from OTX threat intelligence pulses',
-        'VT Malicious': 'Number of antivirus engines flagging as malicious',
-        'VT Suspicious': 'Number of antivirus engines flagging as suspicious',
-        'VT Tags': 'Threat classifications from VirusTotal antivirus engines',
-        'GN Classification': 'GreyNoise classification (malicious, benign, unknown)',
-        'GN Name': 'GreyNoise threat name/description',
-        'GN Tags': 'Tags from GreyNoise threat intelligence'
-    }
-    
     # Define column configuration for links
     column_config = {
+        "Indicator": st.column_config.TextColumn(help="The original IOC (IP, domain, or hash)"),
+        "Type": st.column_config.TextColumn(help="Automatically detected type of the indicator"),
+        "Threat Level": st.column_config.TextColumn(help="Overall threat assessment based on all sources"),
+        "ASN": st.column_config.TextColumn(help="Autonomous System Number of the IP address"),
+        "Country": st.column_config.TextColumn(help="Country associated with the IP address"),
+        "OTX Country": st.column_config.TextColumn(help="Country associated with the IOC in OTX"),
+        "OTX Pulse Count": st.column_config.NumberColumn(help="Number of threat intelligence reports in AlienVault OTX"),
+        "OTX Malicious": st.column_config.CheckboxColumn(help="Whether this IOC is flagged as malicious in OTX"),
+        "OTX Tags": st.column_config.TextColumn(help="Tags from OTX threat intelligence pulses"),
+        "VT Malicious": st.column_config.NumberColumn(help="Number of antivirus engines flagging as malicious"),
+        "VT Suspicious": st.column_config.NumberColumn(help="Number of antivirus engines flagging as suspicious"),
+        "VT Tags": st.column_config.TextColumn(help="Threat classifications from VirusTotal antivirus engines"),
+        "GN Classification": st.column_config.TextColumn(help="GreyNoise classification (malicious, benign, unknown)"),
+        "GN Name": st.column_config.TextColumn(help="GreyNoise threat name/description"),
+        "GN Tags": st.column_config.TextColumn(help="Tags from GreyNoise threat intelligence"),
         "VT": st.column_config.LinkColumn(
             "VirusTotal",
-            display_text="VT"
+            display_text="VT",
+            help="Pivots to the VirusTotal report"
         ),
         "OTX": st.column_config.LinkColumn(
             "OTX",
-            display_text="OTX"
+            display_text="OTX",
+            help="Pivots to the OTX report"
         ),
         "GN": st.column_config.LinkColumn(
             "GreyNoise",
-            display_text="GN"
+            display_text="GN",
+            help="Pivots to the GreyNoise report"
         ),
     }
 
     # Reorder columns for final display
-    final_column_order = ['Indicator', 'Type', 'VT', 'OTX', 'GN', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
+    final_column_order = ['Indicator', 'Type', 'VT', 'OTX', 'GN', 'Threat Level', 'ASN', 'Country', 'OTX Country', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
 
     # Display the dataframe with custom styling
     st.dataframe(
@@ -419,7 +549,7 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
     )
     
     # Download functionality
-    csv = df_results.to_csv(index=False).encode('utf-8')
+    csv = df_display.to_csv(index=False).encode('utf-8')
     st.download_button(
         "📥 Download Enriched Data (CSV)", 
         data=csv, 
