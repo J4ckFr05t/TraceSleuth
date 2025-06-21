@@ -1,0 +1,10 @@
+[server]
+maxUploadSize = 3072  # Size in MB (this will set the limit to 3 GB)
+
+[theme]
+base="dark"
+primaryColor="#00C9A7"  # Cyan-green pop for buttons
+backgroundColor="#121212"
+secondaryBackgroundColor="#1E1E1E"
+textColor="#E0E0E0"
+font="sans serif"

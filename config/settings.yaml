@@ -1,0 +1,4 @@
+api_keys:
+  otx: "YOUR-OTX-API-KEY"
+  virustotal: "YOUR-VT-KEY"
+  greynoise: "YOUR-GREYNOISE-KEY"

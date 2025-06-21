@@ -1,0 +1,12 @@
+streamlit
+pandas
+requests
+python-dotenv
+yara-python
+fuzzywuzzy
+python-Levenshtein
+networkx
+plotly
+pyyaml
+yara-python
+rapidfuzz
