@@ -96,7 +96,6 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         result.update(enrich_otx(ioc))
         result.update(enrich_vt(ioc))
         result.update(enrich_greynoise(ioc))
-        print(result)
         return result
 
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -111,8 +110,10 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         'Type': 'Type',
         'OTX_Pulse_Count': 'OTX Pulse Count',
         'OTX_Malicious': 'OTX Malicious',
+        'OTX_Tags': 'OTX Tags',
         'VT_Malicious': 'VT Malicious',
         'VT_Suspicious': 'VT Suspicious',
+        'VT_Tags': 'VT Tags',
         'GN_Classification': 'GN Classification',
         'GN_Name': 'GN Name',
         'GN_Tags': 'GN Tags'
@@ -125,18 +126,20 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         otx_malicious = row['OTX Malicious'] if row['OTX Malicious'] != '-' else False
         vt_malicious = row['VT Malicious'] if row['VT Malicious'] != '-' else 0
         vt_suspicious = row['VT Suspicious'] if row['VT Suspicious'] != '-' else 0
-        
-        if otx_malicious or vt_malicious > 5:
+        gn_class = row.get('GN Classification', 'unknown').lower()
+
+        if otx_malicious or vt_malicious > 5 or gn_class == 'malicious':
             return "High"
-        elif vt_malicious > 0 or vt_suspicious > 0:
+        elif vt_malicious > 0 or vt_suspicious > 0 or gn_class == 'benign':
             return "Medium"
         else:
             return "Low"
+
     
     df_display['Threat Level'] = df_display.apply(calculate_severity, axis=1)
     
     # Reorder columns for better presentation
-    column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'VT Malicious', 'VT Suspicious', 'GN Classification', 'GN Name', 'GN Tags']
+    column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
     df_display = df_display[column_order]
     
     # Summary statistics - Stock Market Theme
@@ -238,6 +241,129 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # Top Tags Analysis
+    st.subheader("🏷️ Top Tags Analysis")
+    
+    # Collect all tags from all sources
+    all_tags = []
+    
+    # Process GN Tags
+    for _, row in df_display.iterrows():
+        gn_tags = row.get('GN Tags', '-')
+        if gn_tags != '-':
+            tags = [tag.strip() for tag in gn_tags.split(',') if tag.strip()]
+            all_tags.extend([(tag, 'GreyNoise') for tag in tags])
+    
+    # Process VT Tags
+    for _, row in df_display.iterrows():
+        vt_tags = row.get('VT Tags', '-')
+        if vt_tags != '-':
+            tags = [tag.strip() for tag in vt_tags.split(',') if tag.strip()]
+            all_tags.extend([(tag, 'VirusTotal') for tag in tags])
+    
+    # Process OTX Tags
+    for _, row in df_display.iterrows():
+        otx_tags = row.get('OTX Tags', '-')
+        if otx_tags != '-':
+            tags = [tag.strip() for tag in otx_tags.split(',') if tag.strip()]
+            all_tags.extend([(tag, 'OTX') for tag in tags])
+    
+    if all_tags:
+        # Count tag occurrences
+        tag_counts = {}
+        for tag, source in all_tags:
+            if tag not in tag_counts:
+                tag_counts[tag] = {'count': 0, 'sources': set()}
+            tag_counts[tag]['count'] += 1
+            tag_counts[tag]['sources'].add(source)
+        
+        # Convert to DataFrame for visualization
+        tag_data = []
+        for tag, data in tag_counts.items():
+            tag_data.append({
+                'Tag': tag,
+                'Count': data['count'],
+                'Sources': ', '.join(sorted(data['sources']))
+            })
+        
+        tag_df = pd.DataFrame(tag_data)
+        tag_df = tag_df.sort_values('Count', ascending=False).head(20)  # Top 20 tags
+        
+        # Define a function to get source attributes
+        def get_source_attributes(sources_str):
+            is_gn = 'GreyNoise' in sources_str
+            is_vt = 'VirusTotal' in sources_str
+            is_otx = 'OTX' in sources_str
+            
+            if is_gn and is_vt and is_otx:
+                return 'All Sources (GN + VT + OTX)', '#ff6b6b'
+            elif is_gn and is_vt:
+                return 'GreyNoise + VirusTotal', '#feca57'
+            elif is_gn and is_otx:
+                return 'GreyNoise + OTX', '#48cae4'
+            elif is_vt and is_otx:
+                return 'VirusTotal + OTX', '#ff9ff3'
+            elif is_gn:
+                return 'GreyNoise Only', '#2ca02c'
+            elif is_vt:
+                return 'VirusTotal Only', '#d62728'
+            else:  # OTX only
+                return 'OTX Only', '#9467bd'
+
+        # Apply the function to create new columns for legend label and color
+        attributes = tag_df['Sources'].apply(get_source_attributes).apply(pd.Series)
+        attributes.columns = ['LegendLabel', 'Color']
+        tag_df = pd.concat([tag_df, attributes], axis=1)
+        
+        # Create horizontal bar chart
+        fig = go.Figure()
+        
+        # Reverse the order for horizontal bar chart to show highest count at top
+        fig.add_trace(go.Bar(
+            y=tag_df['Tag'].tolist()[::-1],
+            x=tag_df['Count'].tolist()[::-1],
+            orientation='h',
+            marker=dict(color=tag_df['Color'].tolist()[::-1]),  # Use the new color column
+            text=tag_df['Count'].tolist()[::-1],
+            textposition='auto',
+            hovertemplate='<b>%{y}</b><br>Count: %{x}<br>Sources: %{customdata}<extra></extra>',
+            customdata=tag_df['Sources'].tolist()[::-1]
+        ))
+        
+        fig.update_layout(
+            title_text="Top Tags by Frequency",
+            xaxis_title="Count",
+            yaxis_title="Tags",
+            height=max(400, len(tag_df) * 25),
+            showlegend=False,
+            margin=dict(t=50, b=50, l=200, r=50)
+        )
+        
+        # Create side-by-side layout: chart on left, legend on right
+        chart_col, legend_col = st.columns([3, 1])
+        
+        with chart_col:
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with legend_col:
+
+            # Get unique legend items from the dataframe, preserving order
+            unique_legends = tag_df[['LegendLabel', 'Color']].drop_duplicates()
+
+            for _, row in unique_legends.iterrows():
+                label = row['LegendLabel']
+                color = row['Color']
+                st.markdown(
+                    f'<div style="display: flex; align-items: center; margin-bottom: 5px;">'
+                    f'<div style="width: 12px; height: 12px; background-color: {color}; border-radius: 50%; margin-right: 10px;"></div>'
+                    f'<span>{label}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+        
+    else:
+        st.info("No tags found in the enriched data. This could be due to limited threat intelligence data for the provided IOCs.")
+
     # Display results with better formatting
     st.subheader("Enrichment Results")
     
@@ -248,8 +374,13 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         'Threat Level': 'Overall threat assessment based on all sources',
         'OTX Pulse Count': 'Number of threat intelligence reports in AlienVault OTX',
         'OTX Malicious': 'Whether this IOC is flagged as malicious in OTX',
+        'OTX Tags': 'Tags from OTX threat intelligence pulses',
         'VT Malicious': 'Number of antivirus engines flagging as malicious',
-        'VT Suspicious': 'Number of antivirus engines flagging as suspicious'
+        'VT Suspicious': 'Number of antivirus engines flagging as suspicious',
+        'VT Tags': 'Threat classifications from VirusTotal antivirus engines',
+        'GN Classification': 'GreyNoise classification (malicious, benign, unknown)',
+        'GN Name': 'GreyNoise threat name/description',
+        'GN Tags': 'Tags from GreyNoise threat intelligence'
     }
     
     # Display the dataframe with custom styling

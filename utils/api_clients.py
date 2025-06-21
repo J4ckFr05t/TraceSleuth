@@ -31,12 +31,21 @@ def enrich_otx(ioc: str) -> dict:
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
+        
+        # Collect pulse tags
+        pulse_tags = []
+        pulses = data.get("pulse_info", {}).get("pulses", [])
+        for pulse in pulses:
+            tags = pulse.get("tags", [])
+            pulse_tags.extend(tags)
+        
         return {
             "OTX_Pulse_Count": data.get("pulse_info", {}).get("count", 0),
             "OTX_Malicious": bool(data.get("pulse_info", {}).get("count", 0)),
+            "OTX_Tags": ", ".join(set(pulse_tags)) if pulse_tags else "-",
         }
     except:
-        return {"OTX_Pulse_Count": "-", "OTX_Malicious": "-"}
+        return {"OTX_Pulse_Count": "-", "OTX_Malicious": "-", "OTX_Tags": "-"}
 
 # Enrich with VirusTotal
 def enrich_vt(ioc: str) -> dict:
@@ -47,12 +56,21 @@ def enrich_vt(ioc: str) -> dict:
         resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
         stats = data.get("data", [{}])[0].get("attributes", {}).get("last_analysis_stats", {})
+        
+        # Collect popular threat classifications
+        vt_tags = []
+        last_analysis_results = data.get("data", [{}])[0].get("attributes", {}).get("last_analysis_results", {})
+        for engine, result in last_analysis_results.items():
+            if result.get("result") and result.get("result") != "clean":
+                vt_tags.append(result.get("result"))
+        
         return {
             "VT_Malicious": stats.get("malicious", 0),
             "VT_Suspicious": stats.get("suspicious", 0),
+            "VT_Tags": ", ".join(set(vt_tags)) if vt_tags else "-",
         }
     except:
-        return {"VT_Malicious": "-", "VT_Suspicious": "-"}
+        return {"VT_Malicious": "-", "VT_Suspicious": "-", "VT_Tags": "-"}
     
 # Enrich with GreyNoise
 def enrich_greynoise(ioc: str) -> dict:
@@ -69,10 +87,11 @@ def enrich_greynoise(ioc: str) -> dict:
             return {"GN_Classification": "unknown", "GN_Name": "-", "GN_Tags": "-"}
 
         data = resp.json()
+        tags = data.get("tags", [])
         return {
             "GN_Classification": data.get("classification", "-"),
             "GN_Name": data.get("name", "-"),
-            "GN_Tags": ", ".join(data.get("tags", [])) or "-",
+            "GN_Tags": ", ".join(tags) if tags else "-",
         }
     except:
         return {"GN_Classification": "error", "GN_Name": "-", "GN_Tags": "-"}
