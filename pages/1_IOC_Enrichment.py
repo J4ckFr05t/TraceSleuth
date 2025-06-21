@@ -141,6 +141,14 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
     # Reorder columns for better presentation
     column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
     df_display = df_display[column_order]
+
+    # Add pivot links
+    df_display['VT'] = df_display.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['Indicator']}", axis=1)
+    df_display['OTX'] = df_display.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['Indicator']}", axis=1)
+    df_display['GN'] = df_display.apply(
+        lambda row: f"https://www.greynoise.io/viz/ip/{row['Indicator']}" if 'ip' in row['Type'].lower() else None,
+        axis=1
+    )
     
     # Summary statistics - Stock Market Theme
     total_iocs = len(df_display)
@@ -383,11 +391,31 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         'GN Tags': 'Tags from GreyNoise threat intelligence'
     }
     
+    # Define column configuration for links
+    column_config = {
+        "VT": st.column_config.LinkColumn(
+            "VirusTotal",
+            display_text="VT"
+        ),
+        "OTX": st.column_config.LinkColumn(
+            "OTX",
+            display_text="OTX"
+        ),
+        "GN": st.column_config.LinkColumn(
+            "GreyNoise",
+            display_text="GN"
+        ),
+    }
+
+    # Reorder columns for final display
+    final_column_order = ['Indicator', 'Type', 'VT', 'OTX', 'GN', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'OTX Tags', 'VT Malicious', 'VT Suspicious', 'VT Tags', 'GN Classification', 'GN Name', 'GN Tags']
+
     # Display the dataframe with custom styling
     st.dataframe(
-        df_display,
+        df_display[final_column_order],
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config=column_config
     )
     
     # Download functionality
@@ -408,19 +436,19 @@ else:
         st.markdown("""
         **IP Addresses:**
         ```
-        8.8.8.8
-        1.1.1.1
+        23.228.203.130
+        185.177.72.107
         ```
         
         **Domains:**
         ```
-        google.com
-        example.com
+        bill.microsoftbuys.com
+        dnsupdate.dns2.us
         ```
         
         **File Hashes (MD5/SHA256):**
         ```
-        d41d8cd98f00b204e9800998ecf8427e
-        9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+        2183AE45ADEF97500A26DBBF69D910B82BFE721A
+        255F54DE241A3D12DEBAD2DF47BAC5601895E458
         ```
         """)
