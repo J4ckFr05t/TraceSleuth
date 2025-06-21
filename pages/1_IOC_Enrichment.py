@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from utils.api_clients import detect_type, enrich_otx, enrich_vt
+from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise
 from concurrent.futures import ThreadPoolExecutor
 import plotly.graph_objects as go
 
@@ -94,6 +95,8 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         }
         result.update(enrich_otx(ioc))
         result.update(enrich_vt(ioc))
+        result.update(enrich_greynoise(ioc))
+        print(result)
         return result
 
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -109,7 +112,10 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
         'OTX_Pulse_Count': 'OTX Pulse Count',
         'OTX_Malicious': 'OTX Malicious',
         'VT_Malicious': 'VT Malicious',
-        'VT_Suspicious': 'VT Suspicious'
+        'VT_Suspicious': 'VT Suspicious',
+        'GN_Classification': 'GN Classification',
+        'GN_Name': 'GN Name',
+        'GN_Tags': 'GN Tags'
     }
     
     df_display = df_results.rename(columns=column_mapping)
@@ -130,7 +136,7 @@ if st.button("🧠 Enrich IOCs") and ioc_list:
     df_display['Threat Level'] = df_display.apply(calculate_severity, axis=1)
     
     # Reorder columns for better presentation
-    column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'VT Malicious', 'VT Suspicious']
+    column_order = ['Indicator', 'Type', 'Threat Level', 'OTX Pulse Count', 'OTX Malicious', 'VT Malicious', 'VT Suspicious', 'GN Classification', 'GN Name', 'GN Tags']
     df_display = df_display[column_order]
     
     # Summary statistics - Stock Market Theme

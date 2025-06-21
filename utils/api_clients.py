@@ -53,3 +53,26 @@ def enrich_vt(ioc: str) -> dict:
         }
     except:
         return {"VT_Malicious": "-", "VT_Suspicious": "-"}
+    
+# Enrich with GreyNoise
+def enrich_greynoise(ioc: str) -> dict:
+    if detect_type(ioc) != "IP":
+        return {"GN_Classification": "-", "GN_Name": "-", "GN_Tags": "-"}
+    
+    try:
+        gn_key = keys["greynoise"]
+        headers = {"key": gn_key, "accept": "application/json"}
+        url = f"https://api.greynoise.io/v3/community/{ioc}"
+        resp = requests.get(url, headers=headers, timeout=10)
+
+        if resp.status_code == 404:
+            return {"GN_Classification": "unknown", "GN_Name": "-", "GN_Tags": "-"}
+
+        data = resp.json()
+        return {
+            "GN_Classification": data.get("classification", "-"),
+            "GN_Name": data.get("name", "-"),
+            "GN_Tags": ", ".join(data.get("tags", [])) or "-",
+        }
+    except:
+        return {"GN_Classification": "error", "GN_Name": "-", "GN_Tags": "-"}
