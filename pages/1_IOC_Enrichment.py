@@ -460,29 +460,30 @@ if st.session_state.results_df is not None:
                 "ScatterplotLayer",
                 data=map_data,
                 get_position='[lon, lat]',
-                get_color='[255, 69, 0, 160]',  # Orangered with some transparency
-                get_radius='count * 20000 + 10000', # Scale radius by count, with a base size
+                get_color='[0, 191, 255, 180]',  # Using a bright blue for dark mode
+                get_radius='count * 45000 + 20000', # Further increase radius for better visibility
                 pickable=True,
-                radius_min_pixels=5,
-                radius_max_pixels=60,
+                radius_min_pixels=7, # Increase min radius
+                radius_max_pixels=80, # Increase max radius
             )
 
-            # Configure pydeck view
+            # Configure pydeck view for a flat, global map
             view_state = pdk.ViewState(
-                latitude=0, 
+                latitude=20, # Center more on populated areas
                 longitude=0,
-                zoom=0.5,
-                pitch=0,
+                zoom=1.2, # Zoom in more to prevent world wrapping
+                pitch=0, # Ensures the map is flat
             )
             
-            # Tooltip configuration
+            # Tooltip configuration for dark mode
             tooltip = {
                 "html": "<b>{Country}</b><br/><b>IOCs:</b> {count}",
                 "style": {
-                    "backgroundColor": "steelblue",
+                    "backgroundColor": "#272733",
                     "color": "white",
                     "border-radius": "5px",
-                    "padding": "5px"
+                    "padding": "5px",
+                    "border": "1px solid #fff"
                 }
             }
 
@@ -499,6 +500,38 @@ if st.session_state.results_df is not None:
 
     else:
         st.info("No geolocation data available for the provided IOCs (IP addresses).")
+
+    # ASN Distribution Analysis
+    st.subheader("📡 Top ASNs by IOC Count")
+    asn_df = df_display[df_display['ASN'].notna() & (df_display['ASN'] != '-')].copy()
+
+    if not asn_df.empty:
+        asn_counts = asn_df['ASN'].value_counts().reset_index()
+        asn_counts.columns = ['ASN', 'Count']
+        top_asns = asn_counts.head(20)
+
+        fig_asn = go.Figure(go.Bar(
+            y=top_asns['ASN'].astype(str)[::-1],
+            x=top_asns['Count'][::-1],
+            orientation='h',
+            marker=dict(color='#667eea'),
+            text=top_asns['Count'][::-1],
+            textposition='auto',
+            hovertemplate='<b>%{y}</b><br>Count: %{x}<extra></extra>'
+        ))
+
+        fig_asn.update_layout(
+            title_text="Top 20 ASNs by IOC Count",
+            xaxis_title="Number of IOCs",
+            yaxis_title="Autonomous System Number (ASN)",
+            height=max(400, len(top_asns) * 25),
+            showlegend=False,
+            margin=dict(t=50, b=50, l=250, r=50)
+        )
+
+        st.plotly_chart(fig_asn, use_container_width=True)
+    else:
+        st.info("No ASN data available for the provided IOCs.")
 
     # Display results with better formatting
     st.subheader("Enrichment Results")
