@@ -386,41 +386,21 @@ if st.session_state.results_df is not None:
         attributes.columns = ['LegendLabel', 'Color']
         tag_df = pd.concat([tag_df, attributes], axis=1)
         
-        # Create horizontal bar chart
-        fig = go.Figure()
-        
-        # Reverse the order for horizontal bar chart to show highest count at top
-        fig.add_trace(go.Bar(
-            y=tag_df['Tag'].tolist()[::-1],
-            x=tag_df['Count'].tolist()[::-1],
-            orientation='h',
-            marker=dict(color=tag_df['Color'].tolist()[::-1]),  # Use the new color column
-            text=tag_df['Count'].tolist()[::-1],
-            textposition='auto',
-            hovertemplate='<b>%{y}</b><br>Count: %{x}<br>Sources: %{customdata}<extra></extra>',
-            customdata=tag_df['Sources'].tolist()[::-1]
-        ))
-        
-        fig.update_layout(
-            title_text="Top Tags by Frequency",
-            xaxis_title="Count",
-            yaxis_title="Tags",
-            height=max(400, len(tag_df) * 25),
-            showlegend=False,
-            margin=dict(t=50, b=50, l=200, r=50)
-        )
-        
-        # Create side-by-side layout: chart on left, legend on right
-        chart_col, legend_col = st.columns([3, 1])
-        
-        with chart_col:
+        # Check if we have fewer than 5 distinct tags for donut chart
+        if len(tag_df) < 5:
+            # Use donut chart for fewer than 5 tags
+            fig = render_donut_chart(
+                tag_df, 
+                'Count', 
+                'Tag', 
+                'Top Tags by Frequency',
+                colors=tag_df['Color'].tolist()
+            )
             st.plotly_chart(fig, use_container_width=True)
-        
-        with legend_col:
-
-            # Get unique legend items from the dataframe, preserving order
+            
+            # Show legend below the chart
+            st.markdown("##### Tag Sources")
             unique_legends = tag_df[['LegendLabel', 'Color']].drop_duplicates()
-
             for _, row in unique_legends.iterrows():
                 label = row['LegendLabel']
                 color = row['Color']
@@ -431,9 +411,56 @@ if st.session_state.results_df is not None:
                     f'</div>',
                     unsafe_allow_html=True
                 )
+        else:
+            # Use horizontal bar chart for 5 or more tags
+            fig = go.Figure()
+            
+            # Reverse the order for horizontal bar chart to show highest count at top
+            fig.add_trace(go.Bar(
+                y=tag_df['Tag'].tolist()[::-1],
+                x=tag_df['Count'].tolist()[::-1],
+                orientation='h',
+                marker=dict(color=tag_df['Color'].tolist()[::-1]),  # Use the new color column
+                text=tag_df['Count'].tolist()[::-1],
+                textposition='auto',
+                hovertemplate='<b>%{y}</b><br>Count: %{x}<br>Sources: %{customdata}<extra></extra>',
+                customdata=tag_df['Sources'].tolist()[::-1]
+            ))
+            
+            fig.update_layout(
+                title_text="Top Tags by Frequency",
+                xaxis_title="Count",
+                yaxis_title="Tags",
+                height=max(400, len(tag_df) * 25),
+                showlegend=False,
+                margin=dict(t=50, b=50, l=200, r=50)
+            )
+            
+            # Create side-by-side layout: chart on left, legend on right
+            chart_col, legend_col = st.columns([3, 1])
+            
+            with chart_col:
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with legend_col:
+
+                # Get unique legend items from the dataframe, preserving order
+                unique_legends = tag_df[['LegendLabel', 'Color']].drop_duplicates()
+
+                for _, row in unique_legends.iterrows():
+                    label = row['LegendLabel']
+                    color = row['Color']
+                    st.markdown(
+                        f'<div style="display: flex; align-items: center; margin-bottom: 5px;">'
+                        f'<div style="width: 12px; height: 12px; background-color: {color}; border-radius: 50%; margin-right: 10px;"></div>'
+                        f'<span>{label}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
         
     else:
         st.info("No tags found in the enriched data. This could be due to limited threat intelligence data for the provided IOCs.")
+
 
     # Geolocation Analysis
     st.subheader("🌍 Geolocation")
@@ -510,26 +537,38 @@ if st.session_state.results_df is not None:
         asn_counts.columns = ['ASN', 'Count']
         top_asns = asn_counts.head(20)
 
-        fig_asn = go.Figure(go.Bar(
-            y=top_asns['ASN'].astype(str)[::-1],
-            x=top_asns['Count'][::-1],
-            orientation='h',
-            marker=dict(color='#667eea'),
-            text=top_asns['Count'][::-1],
-            textposition='auto',
-            hovertemplate='<b>%{y}</b><br>Count: %{x}<extra></extra>'
-        ))
+        # Check if we have fewer than 5 distinct ASNs for donut chart
+        if len(top_asns) < 5:
+            # Use donut chart for fewer than 5 ASNs
+            fig_asn = render_donut_chart(
+                top_asns, 
+                'Count', 
+                'ASN', 
+                'Top ASNs by IOC Count'
+            )
+            st.plotly_chart(fig_asn, use_container_width=True)
+        else:
+            # Use horizontal bar chart for 5 or more ASNs
+            fig_asn = go.Figure(go.Bar(
+                y=top_asns['ASN'].astype(str)[::-1],
+                x=top_asns['Count'][::-1],
+                orientation='h',
+                marker=dict(color='#667eea'),
+                text=top_asns['Count'][::-1],
+                textposition='auto',
+                hovertemplate='<b>%{y}</b><br>Count: %{x}<extra></extra>'
+            ))
 
-        fig_asn.update_layout(
-            title_text="Top 20 ASNs by IOC Count",
-            xaxis_title="Number of IOCs",
-            yaxis_title="Autonomous System Number (ASN)",
-            height=max(400, len(top_asns) * 25),
-            showlegend=False,
-            margin=dict(t=50, b=50, l=250, r=50)
-        )
+            fig_asn.update_layout(
+                title_text="Top 20 ASNs by IOC Count",
+                xaxis_title="Number of IOCs",
+                yaxis_title="Autonomous System Number (ASN)",
+                height=max(400, len(top_asns) * 25),
+                showlegend=False,
+                margin=dict(t=50, b=50, l=250, r=50)
+            )
 
-        st.plotly_chart(fig_asn, use_container_width=True)
+            st.plotly_chart(fig_asn, use_container_width=True)
     else:
         st.info("No ASN data available for the provided IOCs.")
 

@@ -56,14 +56,31 @@ def enrich_vt(ioc: str) -> dict:
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
-        stats = data.get("data", [{}])[0].get("attributes", {}).get("last_analysis_stats", {})
         
-        # Collect popular threat classifications
+        if not data.get("data"):
+            return {"VT_Malicious": 0, "VT_Suspicious": 0, "VT_Tags": "-"}
+
+        attributes = data.get("data", [{}])[0].get("attributes", {})
+        stats = attributes.get("last_analysis_stats", {})
+        
         vt_tags = []
-        last_analysis_results = data.get("data", [{}])[0].get("attributes", {}).get("last_analysis_results", {})
-        for engine, result in last_analysis_results.items():
-            if result.get("result") and result.get("result") != "clean":
-                vt_tags.append(result.get("result"))
+        
+        # Use popular_threat_classification for better tags if available (files, domains)
+        classification = attributes.get("popular_threat_classification")
+        if classification and classification.get("suggested_threat_label"):
+            vt_tags.append(classification.get("suggested_threat_label"))
+            for category in classification.get("popular_threat_category", []):
+                vt_tags.append(category.get("value"))
+            for name in classification.get("popular_threat_name", []):
+                vt_tags.append(name.get("value"))
+
+        # Fallback to last_analysis_results if the above is not available
+        if not vt_tags:
+            last_analysis_results = attributes.get("last_analysis_results", {})
+            for engine, result in last_analysis_results.items():
+                res = result.get("result")
+                if res and res not in ["clean", "unrated", "timeout"]:
+                    vt_tags.append(res)
         
         return {
             "VT_Malicious": stats.get("malicious", 0),
