@@ -91,7 +91,7 @@ if 'user_input' not in st.session_state:
 
 # --- MAIN APP ---
 
-st.title("🔬 IOC Enrichment Engine")
+st.title("📡 IOC Enrichment")
 st.markdown("Paste IOCs below or upload a CSV file to enrich them with threat intelligence data.")
 
 # --- INPUT ---
@@ -289,7 +289,7 @@ if st.session_state.results_df is not None:
         </div>
         """, unsafe_allow_html=True)
     
-    st.subheader("IOC Type Distribution")
+    st.subheader("🔎 IOC Type Distribution")
 
     # Determine color for each type based on the highest threat level
     threat_order = pd.CategoricalDtype(['Low', 'Medium', 'High'], ordered=True)
@@ -529,7 +529,7 @@ if st.session_state.results_df is not None:
         st.info("No geolocation data available for the provided IOCs (IP addresses).")
 
     # ASN Distribution Analysis
-    st.subheader("📡 Top ASNs by IOC Count")
+    st.subheader("🌐 Top ASNs by IOC Count")
     asn_df = df_display[df_display['ASN'].notna() & (df_display['ASN'] != '-')].copy()
 
     if not asn_df.empty:
@@ -573,7 +573,7 @@ if st.session_state.results_df is not None:
         st.info("No ASN data available for the provided IOCs.")
 
     # Display results with better formatting
-    st.subheader("Enrichment Results")
+    st.subheader("📌 Enrichment Results")
     
     # Define column configuration for links
     column_config = {
