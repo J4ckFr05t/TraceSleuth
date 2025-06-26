@@ -5,6 +5,8 @@ from io import BytesIO
 import tempfile
 from config.high_value_events import DEFAULT_HIGH_VALUE_EVENTS
 import altair as alt
+from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise
+from functools import lru_cache
 
 try:
     from Evtx.Evtx import Evtx
@@ -112,21 +114,21 @@ if uploaded_file is not None:
                                 'ParentImage': parent_image,
                                 'SourceIp': src_ip,
                                 'DestinationIp': dst_ip,
-                                'High Value': '✅' if is_high_value else ''
+                                'HighValue': is_high_value  # Use boolean only
                             })
                         except Exception as e:
                             continue  # skip malformed records
             if records:
                 df = pd.DataFrame(records)
                 if show_only_high_value:
-                    df = df[df['High Value'] == '✅']
-                st.dataframe(df, use_container_width=True)
+                    df = df[df['HighValue']]
+                # st.dataframe(df, use_container_width=True)  # Removed duplicate table view
 
                 # Ensure IOC_Hit column exists (default False for now)
                 if 'IOC_Hit' not in df.columns:
                     df['IOC_Hit'] = False
                 # Ensure HighValue column is boolean for plotting
-                df['HighValue'] = df['High Value'] == '✅'
+                df['HighValue'] = df['HighValue'].astype(bool)
                 # EventType for plotting
                 if 'EventType' not in df.columns:
                     EVENT_TYPE_MAP = {
@@ -191,7 +193,82 @@ if uploaded_file is not None:
 
                 st.markdown("---")
                 st.markdown("### Table View")
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, use_container_width=True, column_config={
+                    'HighValue': st.column_config.CheckboxColumn(help="Is this a high-value event?")
+                })
+
+                # --- Process Ancestry Indented View ---
+                st.markdown('### 🧬 Process Ancestry (Threaded View)')
+                proc_df = df[df['EventType'] == 'Process Create'][['Image', 'ParentImage', 'Timestamp']].copy()
+                proc_df = proc_df.sort_values('Timestamp')
+                # Build mapping: parent -> [children]
+                from collections import defaultdict, deque
+                children_map = defaultdict(list)
+                parent_set = set()
+                image_set = set()
+                for _, row in proc_df.iterrows():
+                    parent = row['ParentImage']
+                    child = row['Image']
+                    children_map[parent].append(child)
+                    parent_set.add(parent)
+                    image_set.add(child)
+                # Roots: Images whose ParentImage is not in Image set
+                roots = [img for img in image_set if img not in parent_set]
+                # To avoid missing chains, also include any process whose parent is None or empty
+                roots += [row['Image'] for _, row in proc_df.iterrows() if not row['ParentImage'] or pd.isna(row['ParentImage'])]
+                roots = list(set(roots))
+                # DFS to print ancestry
+                def print_tree(node, depth, visited):
+                    if node in visited:
+                        return ''  # avoid cycles
+                    visited.add(node)
+                    indent = '    ' * depth + '└── '
+                    s = f"{indent}{node}\n"
+                    for child in children_map.get(node, []):
+                        s += print_tree(child, depth+1, visited)
+                    return s
+                ancestry_str = ''
+                visited = set()
+                for root in roots:
+                    ancestry_str += print_tree(root, 0, visited)
+                if ancestry_str.strip():
+                    st.markdown(f"```\n{ancestry_str}```")
+                else:
+                    st.info('No process ancestry chains found.')
+
+                # --- IOC HIT ENRICHMENT ---
+                @lru_cache(maxsize=512)
+                def enrich_all(ioc):
+                    otx = enrich_otx(ioc)
+                    vt = enrich_vt(ioc)
+                    gn = enrich_greynoise(ioc)
+                    return otx, vt, gn
+
+                def is_ioc_hit(ioc):
+                    otx, vt, gn = enrich_all(ioc)
+                    if otx.get('OTX_Malicious') is True:
+                        return True
+                    if isinstance(vt.get('VT_Malicious'), int) and vt.get('VT_Malicious', 0) > 0:
+                        return True
+                    if str(gn.get('GN_Classification', '')).lower() == 'malicious':
+                        return True
+                    return False
+
+                # For each row, scan all fields for IOCs and set IOC_Hit if any are flagged
+                for idx, row in df.iterrows():
+                    ioc_found = False
+                    for value in row.values:
+                        if not isinstance(value, str):
+                            continue
+                        ioc_type = detect_type(value)
+                        if ioc_type in ("IP", "Hash", "Domain"):
+                            try:
+                                if is_ioc_hit(value):
+                                    ioc_found = True
+                                    break
+                            except Exception as e:
+                                continue
+                    df.at[idx, 'IOC_Hit'] = ioc_found
             else:
                 st.info("No events found in the uploaded EVTX file.")
 else:
