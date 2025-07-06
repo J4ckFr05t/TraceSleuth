@@ -7,6 +7,11 @@ from config.high_value_events import DEFAULT_HIGH_VALUE_EVENTS
 import altair as alt
 from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise
 from functools import lru_cache
+import ipaddress
+import networkx as nx
+from pyvis.network import Network
+import streamlit.components.v1 as components
+import numpy as np
 
 try:
     from Evtx.Evtx import Evtx
@@ -362,69 +367,304 @@ if uploaded_file is not None:
                             tooltip=['Minute', 'Count']
                         ).properties(height=300)
                         st.altair_chart(chart, use_container_width=True)
-                    # --- Protocol Pie Chart ---
+                    # --- Protocol Distribution Charts ---
                     st.markdown('#### 🥧 Protocol Distribution')
+                    
+                    # Calculate protocol statistics
                     proto_counts = filtered_df['Protocol'].value_counts().reset_index()
                     proto_counts.columns = ['Protocol', 'Count']
-                    pie = alt.Chart(proto_counts).mark_arc(innerRadius=40).encode(
-                        theta=alt.Theta(field='Count', type='quantitative'),
-                        color=alt.Color(field='Protocol', type='nominal'),
-                        tooltip=['Protocol', 'Count']
-                    ).properties(height=300)
-                    st.altair_chart(pie, use_container_width=True)
-                    # --- Source-Destination Graph (Optional) ---
-                    st.markdown('#### 🌐 Source-Destination Graph (Experimental)')
-                    import networkx as nx
-                    import plotly.graph_objects as go
-                    G = nx.DiGraph()
+                    total_packets = proto_counts['Count'].sum()
+                    proto_counts['Percentage'] = (proto_counts['Count'] / total_packets * 100).round(1)
+                    proto_counts['Label'] = proto_counts['Protocol'] + ' (' + proto_counts['Percentage'].astype(str) + '%)'
+                    
+                    # Bar chart showing percentages
+                    bar = alt.Chart(proto_counts).mark_bar().encode(
+                        x=alt.X('Percentage:Q', title='Percentage (%)'),
+                        y=alt.Y('Protocol:N', title='Protocol', sort='-x'),
+                        color=alt.Color('Protocol:N', legend=None),
+                        tooltip=[
+                            alt.Tooltip('Protocol:N', title='Protocol'),
+                            alt.Tooltip('Count:Q', title='Count'),
+                            alt.Tooltip('Percentage:Q', title='Percentage', format='.1f')
+                        ]
+                    ).properties(height=400, title='Protocol Distribution by Percentage')
+                    
+                    # Add percentage labels on bars
+                    bar_text = alt.Chart(proto_counts).mark_text(
+                        align='left',
+                        baseline='middle',
+                        dx=5,
+                        fontSize=11,
+                        fontWeight='bold'
+                    ).encode(
+                        x=alt.X('Percentage:Q'),
+                        y=alt.Y('Protocol:N', sort='-x'),
+                        text=alt.Text('Percentage:Q', format='.1f')
+                    )
+                    
+                    bar_chart = alt.layer(bar, bar_text)
+                    st.altair_chart(bar_chart, use_container_width=True)
+                    
+                    # Summary statistics
+                    st.markdown('##### 📊 Protocol Summary')
+                    summary_col1, summary_col2, summary_col3 = st.columns(3)
+                    with summary_col1:
+                        st.metric("Total Packets", f"{total_packets:,}")
+                    with summary_col2:
+                        st.metric("Unique Protocols", len(proto_counts))
+                    with summary_col3:
+                        top_protocol = proto_counts.iloc[0]
+                        st.metric("Most Common", f"{top_protocol['Protocol']} ({top_protocol['Percentage']:.1f}%)")
+                    # --- Source-Destination Graph (Improved: Internal/External Separation) ---
+                    st.markdown('#### 🌐 Source-Destination Graphs (Internal ↔ External)')
+                    def is_internal(ip):
+                        try:
+                            return ipaddress.ip_address(ip).is_private
+                        except Exception:
+                            return False
+
+                    # Prepare flows for graphing
+                    flow_counts = {}
                     for _, row in filtered_df.iterrows():
-                        if row['Source IP'] and row['Destination IP']:
-                            G.add_edge(row['Source IP'], row['Destination IP'])
-                    if G.number_of_edges() > 0:
-                        pos = nx.spring_layout(G, k=0.5, iterations=20)
-                        edge_x = []
-                        edge_y = []
-                        for src, dst in G.edges():
-                            x0, y0 = pos[src]
-                            x1, y1 = pos[dst]
-                            edge_x += [x0, x1, None]
-                            edge_y += [y0, y1, None]
-                        edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none', mode='lines')
-                        node_x = []
-                        node_y = []
-                        node_text = []
-                        for node in G.nodes():
-                            x, y = pos[node]
-                            node_x.append(x)
-                            node_y.append(y)
-                            node_text.append(str(node))
-                        node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text', text=node_text, textposition='top center', marker=dict(size=10, color='skyblue'), hoverinfo='text')
-                        fig = go.Figure(data=[edge_trace, node_trace], layout=go.Layout(
-                            showlegend=False,
-                            hovermode='closest',
-                            margin=dict(b=20,l=5,r=5,t=40),
-                            xaxis=dict(showgrid=False, zeroline=False),
-                            yaxis=dict(showgrid=False, zeroline=False),
-                            title='Source-Destination Communication Graph'
-                        ))
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info('Not enough data for a source-destination graph.')
-                    # --- Prepare for IOC Enrichment ---
-                    st.markdown('#### 🔎 IOC Enrichment for Network Flows')
-                    # Collect unique IOCs (IPs/domains/FQDNs/DNS names)
-                    ioc_candidates = set()
-                    for col in ['Source IP', 'Destination IP', 'Host/Domain']:
-                        ioc_candidates.update(filtered_df[col].dropna().astype(str).tolist())
-                    # Remove empty/invalid
-                    ioc_candidates = set(ioc for ioc in ioc_candidates if ioc and ioc != 'None' and ioc != '-')
-                    # Detect type and filter for IP, Domain, FQDN, DNS
-                    ioc_list = []
-                    for ioc in ioc_candidates:
-                        t = detect_type(ioc)
-                        if t in ("IP", "Domain"):
-                            ioc_list.append(ioc)
-                    if ioc_list:
+                        src = row['Source IP']
+                        dst = row['Destination IP']
+                        if src and dst and src != dst:
+                            key = (src, dst)
+                            flow_counts[key] = flow_counts.get(key, 0) + 1
+
+                    # Group flows
+                    internal_to_external = {}
+                    external_to_internal = {}
+                    for (src, dst), count in flow_counts.items():
+                        src_internal = is_internal(src)
+                        dst_internal = is_internal(dst)
+                        if src_internal and not dst_internal:
+                            internal_to_external[(src, dst)] = count
+                        elif not src_internal and dst_internal:
+                            external_to_internal[(src, dst)] = count
+
+                    # Helper to build and render a pyvis graph
+                    def build_pyvis_graph(flow_dict, direction_label):
+                        net = Network(height='500px', width='100%', bgcolor='#181818', font_color='white', directed=True)
+                        node_types = {}
+                        for (src, dst), count in flow_dict.items():
+                            for ip, is_int in [(src, is_internal(src)), (dst, is_internal(dst))]:
+                                if ip not in node_types:
+                                    node_types[ip] = is_int
+                        for ip, is_int in node_types.items():
+                            color = '#4FC3F7' if is_int else '#FF7043'  # blue for internal, orange for external
+                            net.add_node(ip, label=ip, color=color, font={'color': 'white'})
+                        max_count = max(flow_dict.values()) if flow_dict else 1
+                        for (src, dst), count in flow_dict.items():
+                            width = 1 + 6 * (count / max_count)  # 1-7 px
+                            net.add_edge(src, dst, value=count, title=f"{src} → {dst}<br>Packets: {count}", width=width, color='#BDBDBD')
+                        net.set_options('''
+                        var options = {
+                          "nodes": {
+                            "borderWidth": 2,
+                            "shadow": true,
+                            "font": { "color": "white", "size": 16 }
+                          },
+                          "edges": {
+                            "color": { "color": "#BDBDBD" },
+                            "smooth": true,
+                            "arrows": { "to": { "enabled": true, "scaleFactor": 0.7 } },
+                            "shadow": true
+                          },
+                          "layout": {
+                            "improvedLayout": true
+                          },
+                          "physics": {
+                            "enabled": true,
+                            "barnesHut": { "gravitationalConstant": -8000, "springLength": 120, "springConstant": 0.04 }
+                          },
+                          "interaction": {
+                            "hover": true,
+                            "tooltipDelay": 100
+                          },
+                          "manipulation": { "enabled": false },
+                          "autoResize": true
+                        }
+                        ''')
+                        html = net.generate_html()
+                        # Inject CSS to remove white border/background
+                        dark_css = '''<style>
+                        body { background: #181818 !important; }
+                        #mynetwork { background: #181818 !important; border: none !important; }
+                        .vis-network { background: #181818 !important; }
+                        div { border: none !important; }
+                        </style>'''
+                        if '</head>' in html:
+                            html = html.replace('</head>', f'{dark_css}</head>')
+                        else:
+                            html = dark_css + html
+                        return html
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown('**Internal → External**')
+                        if internal_to_external:
+                            net1 = build_pyvis_graph(internal_to_external, 'Internal → External')
+                            components.html(net1, height=520, scrolling=False)
+                        else:
+                            st.info('No Internal → External flows found.')
+                    with col2:
+                        st.markdown('**External → Internal**')
+                        if external_to_internal:
+                            net2 = build_pyvis_graph(external_to_internal, 'External → Internal')
+                            components.html(net2, height=520, scrolling=False)
+                        else:
+                            st.info('No External → Internal flows found.')
+                    
+                # --- Port Usage Analysis ---
+                st.markdown('#### 🔢 Port Usage Analysis')
+
+                # Extract relevant info for TCP/UDP packets
+                tcp_udp_rows = []
+                for pkt in cap:
+                    try:
+                        proto = getattr(pkt, 'transport_layer', None)
+                        if proto not in ('TCP', 'UDP'):
+                            continue
+                        src_ip = getattr(pkt, 'ip', None)
+                        src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
+                        dst_ip = getattr(pkt, 'ip', None)
+                        dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
+                        src_port = getattr(pkt, proto.lower(), None)
+                        src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, f'{proto.lower()}.srcport', None)
+                        dst_port = getattr(pkt, proto.lower(), None)
+                        dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, f'{proto.lower()}.dstport', None)
+                        if src_ip and dst_ip and src_port and dst_port:
+                            tcp_udp_rows.append({
+                                'Protocol': proto,
+                                'Source IP': src_ip,
+                                'Destination IP': dst_ip,
+                                'Source Port': str(src_port),
+                                'Destination Port': str(dst_port)
+                            })
+                    except Exception:
+                        continue
+
+                if tcp_udp_rows:
+                    port_df = pd.DataFrame(tcp_udp_rows)
+                    # Protocol filter
+                    proto_options = port_df['Protocol'].unique().tolist()
+                    proto_filter = st.multiselect('Protocol', proto_options, default=proto_options, key='port_proto_filter')
+                    filtered_port_df = port_df[port_df['Protocol'].isin(proto_filter)]
+                    # Toggle between source/destination port
+                    port_type = st.radio('Show Top Ports by:', ['Destination Port', 'Source Port'], horizontal=True)
+                    port_col = 'Destination Port' if port_type == 'Destination Port' else 'Source Port'
+                    # Aggregate counts
+                    agg = filtered_port_df.groupby(['Protocol', port_col]).size().reset_index(name='Packet Count')
+                    # Top N
+                    N = st.slider('Show Top N Ports', min_value=5, max_value=30, value=10, step=1)
+                    top_ports = agg.sort_values('Packet Count', ascending=False).head(N)
+                    # Bar chart
+                    bar_chart = alt.Chart(top_ports).mark_bar().encode(
+                        x=alt.X('Packet Count:Q', title='Packet Count'),
+                        y=alt.Y(f'{port_col}:N', title=port_col, sort='-x'),
+                        color=alt.Color('Protocol:N', legend=alt.Legend(title='Protocol')),
+                        tooltip=['Protocol', port_col, 'Packet Count']
+                    ).properties(height=400, title=f'Top {N} {port_type}s by Packet Count')
+                    st.altair_chart(bar_chart.configure(
+                        background='#181818',
+                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                        legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                        title=alt.TitleConfig(color='white')
+                    ), use_container_width=True)
+                    # Table
+                    st.markdown('##### Port Flow Table')
+                    flow_agg = filtered_port_df.groupby(['Source IP', 'Destination IP', 'Source Port', 'Destination Port', 'Protocol']).size().reset_index(name='Packet Count')
+                    st.dataframe(flow_agg, use_container_width=True, height=400)
+                else:
+                    st.info('No TCP/UDP packets found for port analysis.')
+
+                # --- Packet Size Analysis ---
+                st.markdown('#### 📦 Packet Size Analysis')
+
+                packet_sizes = []
+                timestamps = []
+                for pkt in cap:
+                    try:
+                        length = int(getattr(pkt, 'length', None) or getattr(pkt, 'frame_info', None) and getattr(pkt.frame_info, 'len', None) or getattr(pkt, 'frame.len', None) or 0)
+                        ts = getattr(pkt, 'sniff_time', None)
+                        if length > 0:
+                            packet_sizes.append(length)
+                            timestamps.append(ts)
+                    except Exception:
+                        continue
+
+                if packet_sizes:
+                    size_df = pd.DataFrame({'Packet Size (bytes)': packet_sizes, 'Timestamp': timestamps})
+                    # Histogram
+                    st.markdown('**Histogram of Packet Sizes**')
+                    hist = alt.Chart(size_df).mark_bar().encode(
+                        alt.X('Packet Size (bytes):Q', bin=alt.Bin(maxbins=40), title='Packet Size (bytes)'),
+                        alt.Y('count()', title='Number of Packets'),
+                        tooltip=[alt.Tooltip('count()', title='Packets'), alt.Tooltip('Packet Size (bytes):Q', title='Size')]
+                    ).properties(height=350, title='Packet Size Distribution')
+                    st.altair_chart(hist.configure(
+                        background='#181818',
+                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                        legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                        title=alt.TitleConfig(color='white')
+                    ), use_container_width=True)
+                    # Boxplot (optional)
+                    st.markdown('**Boxplot of Packet Sizes**')
+                    box = alt.Chart(size_df).mark_boxplot(extent='min-max').encode(
+                        y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
+                        color=alt.value('#4FC3F7')
+                    ).properties(height=200, title='Packet Size Boxplot')
+                    st.altair_chart(box.configure(
+                        background='#181818',
+                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                        title=alt.TitleConfig(color='white')
+                    ), use_container_width=True)
+                    # Time series (optional)
+                    st.markdown('**Packet Size Over Time**')
+                    if size_df['Timestamp'].notnull().any():
+                        size_df['Timestamp'] = pd.to_datetime(size_df['Timestamp'])
+                        ts_chart = alt.Chart(size_df).mark_line(point=True).encode(
+                            x=alt.X('Timestamp:T', title='Time'),
+                            y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
+                            tooltip=['Timestamp', 'Packet Size (bytes)']
+                        ).properties(height=250, title='Packet Size Over Time')
+                        st.altair_chart(ts_chart.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                    # Descriptive stats
+                    st.markdown('**Descriptive Statistics**')
+                    stats = {
+                        'Min Size': int(np.min(packet_sizes)),
+                        'Max Size': int(np.max(packet_sizes)),
+                        'Median': float(np.median(packet_sizes)),
+                        'Mean': float(np.mean(packet_sizes)),
+                        'Std Deviation': float(np.std(packet_sizes)),
+                        'Total Packets': len(packet_sizes)
+                    }
+                    st.dataframe(pd.DataFrame(stats, index=[0]), use_container_width=True)
+                else:
+                    st.info('No packet size data found in this PCAP.')
+
+                # --- Prepare for IOC Enrichment ---
+                st.markdown('#### 🔎 IOC Enrichment for Network Flows')
+                # Collect unique IOCs (IPs/domains/FQDNs/DNS names)
+                ioc_candidates = set()
+                for col in ['Source IP', 'Destination IP', 'Host/Domain']:
+                    ioc_candidates.update(filtered_df[col].dropna().astype(str).tolist())
+                # Remove empty/invalid
+                ioc_candidates = set(ioc for ioc in ioc_candidates if ioc and ioc != 'None' and ioc != '-')
+                # Detect type and filter for IP, Domain, FQDN, DNS
+                ioc_list = []
+                for ioc in ioc_candidates:
+                    t = detect_type(ioc)
+                    if t in ("IP", "Domain"):
+                        ioc_list.append(ioc)
+                if ioc_list:
+                    enrich_button = st.button('Run IOC Enrichment')
+                    if enrich_button:
                         st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
                         from concurrent.futures import ThreadPoolExecutor
                         @lru_cache(maxsize=512)
@@ -440,16 +680,375 @@ if uploaded_file is not None:
                             except ImportError:
                                 pass
                             return result
-                        with st.spinner("Enriching IOCs, please wait..."):
-                            with ThreadPoolExecutor(max_workers=10) as executor:
-                                enriched = list(executor.map(enrich_all, ioc_list))
+                        progress_bar = st.progress(0)
+                        enriched = []
+                        with ThreadPoolExecutor(max_workers=10) as executor:
+                            futures = list(executor.map(enrich_all, ioc_list))
+                            for i, res in enumerate(futures):
+                                enriched.append(res)
+                                progress_bar.progress((i + 1) / len(ioc_list))
                         df_enrich = pd.DataFrame(enriched)
                         # Display enrichment results
                         st.markdown('##### IOC Enrichment Results')
                         st.dataframe(df_enrich, use_container_width=True)
-                    else:
-                        st.info('No valid IPs or domains found for enrichment.')
+                else:
+                    st.info('No valid IPs or domains found for enrichment.')
             except Exception as e:
                 st.error(f"Error parsing PCAP: {e}")
+    elif file_extension in ["json", "jsonl"]:
+        st.markdown('#### 🗂️ JSON/JSONL Viewer')
+        import json
+        try:
+            content = uploaded_file.read().decode('utf-8')
+            if file_extension == "jsonl":
+                # Parse line by line
+                lines = [json.loads(line) for line in content.splitlines() if line.strip()]
+                df = pd.DataFrame(lines)
+                # --- Stats ---
+                col1, col2 = st.columns(2)
+                col1.metric('Records', len(df))
+                col2.metric('Unique Keys', len(set().union(*df.columns)))
+                with st.expander('Example Keys'):
+                    st.write(list(df.columns)[:10])
+                st.write(f"Parsed {len(lines)} JSONL records.")
+                st.dataframe(df, use_container_width=True)
+                filter_val = st.text_input('Filter by key or value (case-insensitive):', '')
+                if filter_val:
+                    mask = df.apply(lambda row: row.astype(str).str.contains(filter_val, case=False).any(), axis=1)
+                    st.dataframe(df[mask], use_container_width=True)
+                # --- IOC Extraction & Enrichment ---
+                ioc_candidates = set()
+                for val in df.astype(str).values.flatten():
+                    t = detect_type(val)
+                    if t in ("IP", "Domain"):
+                        ioc_candidates.add(val)
+                if ioc_candidates:
+                    st.markdown('**IOC Enrichment**')
+                    enrich_button = st.button('Run IOC Enrichment (JSONL)')
+                    if enrich_button:
+                        from concurrent.futures import ThreadPoolExecutor
+                        @lru_cache(maxsize=512)
+                        def enrich_all(ioc):
+                            result = {"IOC": ioc, "Type": detect_type(ioc)}
+                            result.update(enrich_otx(ioc))
+                            result.update(enrich_vt(ioc))
+                            result.update(enrich_greynoise(ioc))
+                            try:
+                                from utils.api_clients import enrich_ipinfo
+                                result.update(enrich_ipinfo(ioc))
+                            except ImportError:
+                                pass
+                            return result
+                        progress_bar = st.progress(0)
+                        enriched = []
+                        ioc_list = list(ioc_candidates)
+                        with ThreadPoolExecutor(max_workers=10) as executor:
+                            futures = list(executor.map(enrich_all, ioc_list))
+                            for i, res in enumerate(futures):
+                                enriched.append(res)
+                                progress_bar.progress((i + 1) / len(ioc_list))
+                        df_enrich = pd.DataFrame(enriched)
+                        st.dataframe(df_enrich, use_container_width=True)
+            else:
+                data = json.loads(content)
+                # --- Stats ---
+                if isinstance(data, list) and all(isinstance(x, dict) for x in data):
+                    df = pd.DataFrame(data)
+                    col1, col2 = st.columns(2)
+                    col1.metric('Records', len(df))
+                    col2.metric('Unique Keys', len(set().union(*df.columns)))
+                    with st.expander('Example Keys'):
+                        st.write(list(df.columns)[:10])
+                elif isinstance(data, dict):
+                    col1, col2 = st.columns(2)
+                    col1.metric('Num Keys', len(data.keys()))
+                    with col2:
+                        with st.expander('Top-level Keys'):
+                            st.write(list(data.keys()))
+                st.json(data, expanded=False)
+                # If array of objects, show as table
+                if isinstance(data, list) and all(isinstance(x, dict) for x in data):
+                    st.dataframe(df, use_container_width=True)
+                    filter_val = st.text_input('Filter by key or value (case-insensitive):', '')
+                    if filter_val:
+                        mask = df.apply(lambda row: row.astype(str).str.contains(filter_val, case=False).any(), axis=1)
+                        st.dataframe(df[mask], use_container_width=True)
+                    # --- IOC Extraction & Enrichment ---
+                    ioc_candidates = set()
+                    for val in df.astype(str).values.flatten():
+                        t = detect_type(val)
+                        if t in ("IP", "Domain"):
+                            ioc_candidates.add(val)
+                    if ioc_candidates:
+                        st.markdown('**IOC Enrichment**')
+                        enrich_button = st.button('Run IOC Enrichment (JSON)')
+                        if enrich_button:
+                            from concurrent.futures import ThreadPoolExecutor
+                            @lru_cache(maxsize=512)
+                            def enrich_all(ioc):
+                                result = {"IOC": ioc, "Type": detect_type(ioc)}
+                                result.update(enrich_otx(ioc))
+                                result.update(enrich_vt(ioc))
+                                result.update(enrich_greynoise(ioc))
+                                try:
+                                    from utils.api_clients import enrich_ipinfo
+                                    result.update(enrich_ipinfo(ioc))
+                                except ImportError:
+                                    pass
+                                return result
+                            progress_bar = st.progress(0)
+                            enriched = []
+                            ioc_list = list(ioc_candidates)
+                            with ThreadPoolExecutor(max_workers=10) as executor:
+                                futures = list(executor.map(enrich_all, ioc_list))
+                                for i, res in enumerate(futures):
+                                    enriched.append(res)
+                                    progress_bar.progress((i + 1) / len(ioc_list))
+                            df_enrich = pd.DataFrame(enriched)
+                            st.dataframe(df_enrich, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error parsing JSON/JSONL: {e}")
+
+    elif file_extension == "xml":
+        st.markdown('#### 🗂️ XML Viewer')
+        import xml.dom.minidom
+        try:
+            content = uploaded_file.read().decode('utf-8')
+            dom = xml.dom.minidom.parseString(content)
+            pretty_xml = dom.toprettyxml()
+            # --- Stats ---
+            def count_elements(node):
+                return 1 + sum(count_elements(child) for child in node.childNodes if child.nodeType == child.ELEMENT_NODE)
+            def max_depth(node, depth=0):
+                if not node.childNodes:
+                    return depth
+                return max([max_depth(child, depth+1) for child in node.childNodes if child.nodeType == child.ELEMENT_NODE] or [depth])
+            col1, col2, col3 = st.columns(3)
+            col1.metric('Root Tag', dom.documentElement.nodeName)
+            col2.metric('Num Elements', count_elements(dom.documentElement))
+            col3.metric('Max Depth', max_depth(dom.documentElement))
+            st.code(pretty_xml, language='xml')
+            # Collapsible tree view using st.expander
+            def xml_to_tree(node, depth=0, ioc_candidates=None):
+                if ioc_candidates is None:
+                    ioc_candidates = set()
+                if node.nodeType == node.ELEMENT_NODE:
+                    with st.expander(f"{'  '*depth}<{node.nodeName}>"):
+                        for attr in node.attributes.values() if node.attributes else []:
+                            t = detect_type(attr.value)
+                            if t in ("IP", "Domain"):
+                                ioc_candidates.add(attr.value)
+                        for child in node.childNodes:
+                            xml_to_tree(child, depth+1, ioc_candidates)
+                elif node.nodeType == node.TEXT_NODE and node.data.strip():
+                    t = detect_type(node.data.strip())
+                    if t in ("IP", "Domain"):
+                        ioc_candidates.add(node.data.strip())
+                    st.write(f"{'  '*depth}{node.data.strip()}")
+                return ioc_candidates
+            st.markdown('**Tree View**')
+            ioc_candidates = xml_to_tree(dom.documentElement)
+            # XPath filter (optional)
+            xpath = st.text_input('XPath filter (optional):', '')
+            if xpath:
+                try:
+                    import lxml.etree as LET
+                    tree = LET.fromstring(content)
+                    results = tree.xpath(xpath)
+                    st.write(f"XPath results ({len(results)}):")
+                    for r in results:
+                        st.write(LET.tostring(r, pretty_print=True, encoding='unicode'))
+                except Exception as e:
+                    st.error(f"XPath error: {e}")
+            # --- IOC Enrichment ---
+            if ioc_candidates:
+                st.markdown('**IOC Enrichment**')
+                enrich_button = st.button('Run IOC Enrichment (XML)')
+                if enrich_button:
+                    from concurrent.futures import ThreadPoolExecutor
+                    @lru_cache(maxsize=512)
+                    def enrich_all(ioc):
+                        result = {"IOC": ioc, "Type": detect_type(ioc)}
+                        result.update(enrich_otx(ioc))
+                        result.update(enrich_vt(ioc))
+                        result.update(enrich_greynoise(ioc))
+                        try:
+                            from utils.api_clients import enrich_ipinfo
+                            result.update(enrich_ipinfo(ioc))
+                        except ImportError:
+                            pass
+                        return result
+                    progress_bar = st.progress(0)
+                    enriched = []
+                    ioc_list = list(ioc_candidates)
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        futures = list(executor.map(enrich_all, ioc_list))
+                        for i, res in enumerate(futures):
+                            enriched.append(res)
+                            progress_bar.progress((i + 1) / len(ioc_list))
+                    df_enrich = pd.DataFrame(enriched)
+                    st.dataframe(df_enrich, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error parsing XML: {e}")
+
+    elif file_extension == "csv":
+        st.markdown('#### 🗂️ CSV Viewer')
+        try:
+            df = pd.read_csv(uploaded_file)
+            # --- Stats ---
+            col1, col2, col3 = st.columns(3)
+            col1.metric('Rows', len(df))
+            col2.metric('Columns', len(df.columns))
+            col3.metric('Missing Values', int(df.isnull().sum().sum()))
+            with st.expander('Column Names'):
+                st.write(list(df.columns))
+            st.dataframe(df, use_container_width=True)
+            filter_val = st.text_input('Search/filter CSV:', '')
+            if filter_val:
+                mask = df.apply(lambda row: row.astype(str).str.contains(filter_val, case=False).any(), axis=1)
+                st.dataframe(df[mask], use_container_width=True)
+            # --- IOC Extraction & Enrichment ---
+            ioc_candidates = set()
+            for val in df.astype(str).values.flatten():
+                t = detect_type(val)
+                if t in ("IP", "Domain"):
+                    ioc_candidates.add(val)
+            if ioc_candidates:
+                st.markdown('**IOC Enrichment**')
+                enrich_button = st.button('Run IOC Enrichment (CSV)')
+                if enrich_button:
+                    from concurrent.futures import ThreadPoolExecutor
+                    @lru_cache(maxsize=512)
+                    def enrich_all(ioc):
+                        result = {"IOC": ioc, "Type": detect_type(ioc)}
+                        result.update(enrich_otx(ioc))
+                        result.update(enrich_vt(ioc))
+                        result.update(enrich_greynoise(ioc))
+                        try:
+                            from utils.api_clients import enrich_ipinfo
+                            result.update(enrich_ipinfo(ioc))
+                        except ImportError:
+                            pass
+                        return result
+                    progress_bar = st.progress(0)
+                    enriched = []
+                    ioc_list = list(ioc_candidates)
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        futures = list(executor.map(enrich_all, ioc_list))
+                        for i, res in enumerate(futures):
+                            enriched.append(res)
+                            progress_bar.progress((i + 1) / len(ioc_list))
+                    df_enrich = pd.DataFrame(enriched)
+                    st.dataframe(df_enrich, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error parsing CSV: {e}")
+
+    elif file_extension in ["db", "sqlite"]:
+        st.markdown('#### 🗂️ Database Viewer')
+        import sqlite3
+        import duckdb
+        import os
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmpfile:
+            tmpfile.write(uploaded_file.read())
+            tmpfile.flush()
+            db_path = tmpfile.name
+        try:
+            con = sqlite3.connect(db_path)
+            tables = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table';", con)['name'].tolist()
+            # --- Stats ---
+            st.markdown('**Stats**')
+            col1, col2 = st.columns(2)
+            col1.metric('Num Tables', len(tables))
+            with col2:
+                with st.expander('Tables'):
+                    st.write(tables)
+            st.write(f"Tables found: {tables}")
+            table = st.selectbox('Select table to view', tables)
+            if table:
+                df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 100", con)
+                c1, c2 = st.columns(2)
+                c1.metric('Rows (preview)', len(df))
+                c2.metric('Columns', len(df.columns))
+                with st.expander('Column Names'):
+                    st.write(list(df.columns))
+                st.dataframe(df, use_container_width=True)
+            query = st.text_area('Run SQL query (DuckDB syntax supported):', f'SELECT * FROM {table} LIMIT 100')
+            if st.button('Run Query'):
+                try:
+                    duck_con = duckdb.connect()
+                    duck_con.execute(f"INSTALL sqlite; LOAD sqlite; ATTACH '{db_path}' AS db;")
+                    result = duck_con.execute(query).fetchdf()
+                    st.dataframe(result, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Query error: {e}")
+        except Exception as e:
+            st.error(f"Error opening database: {e}")
+        finally:
+            os.unlink(db_path)
+
+    elif file_extension == "bin":
+        st.markdown('#### 🗂️ Binary (Hex) Viewer')
+        import binascii
+        content = uploaded_file.read()
+        # --- Stats ---
+        st.markdown('**Stats**')
+        col1, col2 = st.columns(2)
+        col1.metric('File Size (bytes)', len(content))
+        col2.metric('Magic Number', binascii.hexlify(content[:8]).decode('ascii').upper())
+        def hex_view(data, width=16):
+            lines = []
+            for i in range(0, len(data), width):
+                chunk = data[i:i+width]
+                hex_bytes = ' '.join(f'{b:02X}' for b in chunk)
+                ascii_bytes = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                lines.append(f'{i:08X}  {hex_bytes:<{width*3}}  {ascii_bytes}')
+            return '\n'.join(lines)
+        st.code(hex_view(content), language='text')
+        # Magic number detection
+        magic = binascii.hexlify(content[:8]).decode('ascii').upper()
+        st.write(f"Magic number (first 8 bytes): {magic}")
+        search = st.text_input('Search for hex string or ASCII keyword:')
+        if search:
+            found = False
+            if all(c in '0123456789ABCDEFabcdef' for c in search) and len(search) % 2 == 0:
+                # Hex search
+                if bytes.fromhex(search.lower()) in content:
+                    st.success('Hex string found!')
+                    found = True
+            else:
+                if search.encode() in content:
+                    st.success('ASCII keyword found!')
+                    found = True
+            if not found:
+                st.warning('Not found.')
+
+    else:
+        st.markdown('#### 🗂️ Fallback Viewer')
+        try:
+            content = uploaded_file.read()
+            # --- Stats ---
+            st.markdown('**Stats**')
+            col1, col2 = st.columns(2)
+            col1.metric('File Size (bytes)', len(content))
+            try:
+                text = content.decode('utf-8')
+                col2.metric('Lines', text.count('\n')+1)
+                with st.expander('Characters'):
+                    st.write(len(text))
+                st.text_area('Text Preview', text, height=400)
+            except Exception:
+                st.warning('Unsupported file type – opened in fallback mode (hex view below)')
+                import binascii
+                def hex_view(data, width=16):
+                    lines = []
+                    for i in range(0, len(data), width):
+                        chunk = data[i:i+width]
+                        hex_bytes = ' '.join(f'{b:02X}' for b in chunk)
+                        ascii_bytes = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                        lines.append(f'{i:08X}  {hex_bytes:<{width*3}}  {ascii_bytes}')
+                    return '\n'.join(lines)
+                st.code(hex_view(content), language='text')
+        except Exception as e:
+            st.error(f"Error opening file: {e}")
 else:
     st.info("Please upload a file to proceed.") 
