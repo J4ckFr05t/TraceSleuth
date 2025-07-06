@@ -10,3 +10,6 @@ plotly
 pyyaml
 yara-python
 rapidfuzz
+python-evtx
+pyshark
+pyvis
