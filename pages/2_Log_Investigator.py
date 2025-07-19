@@ -12,6 +12,14 @@ import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
 import numpy as np
+import sqlite3
+import duckdb
+import os
+import json
+import xml.dom.minidom
+import binascii
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from Evtx.Evtx import Evtx
@@ -207,7 +215,6 @@ if uploaded_file is not None:
                 proc_df = df[df['EventType'] == 'Process Create'][['Image', 'ParentImage', 'Timestamp']].copy()
                 proc_df = proc_df.sort_values('Timestamp')
                 # Build mapping: parent -> [children]
-                from collections import defaultdict, deque
                 children_map = defaultdict(list)
                 parent_set = set()
                 image_set = set()
@@ -666,7 +673,6 @@ if uploaded_file is not None:
                     enrich_button = st.button('Run IOC Enrichment')
                     if enrich_button:
                         st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
-                        from concurrent.futures import ThreadPoolExecutor
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -697,7 +703,6 @@ if uploaded_file is not None:
                 st.error(f"Error parsing PCAP: {e}")
     elif file_extension in ["json", "jsonl"]:
         st.markdown('#### 🗂️ JSON/JSONL Viewer')
-        import json
         try:
             content = uploaded_file.read().decode('utf-8')
             if file_extension == "jsonl":
@@ -726,7 +731,6 @@ if uploaded_file is not None:
                     st.markdown('**IOC Enrichment**')
                     enrich_button = st.button('Run IOC Enrichment (JSONL)')
                     if enrich_button:
-                        from concurrent.futures import ThreadPoolExecutor
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -783,7 +787,6 @@ if uploaded_file is not None:
                         st.markdown('**IOC Enrichment**')
                         enrich_button = st.button('Run IOC Enrichment (JSON)')
                         if enrich_button:
-                            from concurrent.futures import ThreadPoolExecutor
                             @lru_cache(maxsize=512)
                             def enrich_all(ioc):
                                 result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -808,10 +811,8 @@ if uploaded_file is not None:
                             st.dataframe(df_enrich, use_container_width=True)
         except Exception as e:
             st.error(f"Error parsing JSON/JSONL: {e}")
-
     elif file_extension == "xml":
         st.markdown('#### 🗂️ XML Viewer')
-        import xml.dom.minidom
         try:
             content = uploaded_file.read().decode('utf-8')
             dom = xml.dom.minidom.parseString(content)
@@ -865,7 +866,6 @@ if uploaded_file is not None:
                 st.markdown('**IOC Enrichment**')
                 enrich_button = st.button('Run IOC Enrichment (XML)')
                 if enrich_button:
-                    from concurrent.futures import ThreadPoolExecutor
                     @lru_cache(maxsize=512)
                     def enrich_all(ioc):
                         result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -890,7 +890,6 @@ if uploaded_file is not None:
                     st.dataframe(df_enrich, use_container_width=True)
         except Exception as e:
             st.error(f"Error parsing XML: {e}")
-
     elif file_extension == "csv":
         st.markdown('#### 🗂️ CSV Viewer')
         try:
@@ -917,7 +916,6 @@ if uploaded_file is not None:
                 st.markdown('**IOC Enrichment**')
                 enrich_button = st.button('Run IOC Enrichment (CSV)')
                 if enrich_button:
-                    from concurrent.futures import ThreadPoolExecutor
                     @lru_cache(maxsize=512)
                     def enrich_all(ioc):
                         result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -942,12 +940,8 @@ if uploaded_file is not None:
                     st.dataframe(df_enrich, use_container_width=True)
         except Exception as e:
             st.error(f"Error parsing CSV: {e}")
-
     elif file_extension in ["db", "sqlite"]:
         st.markdown('#### 🗂️ Database Viewer')
-        import sqlite3
-        import duckdb
-        import os
         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmpfile:
             tmpfile.write(uploaded_file.read())
             tmpfile.flush()
@@ -985,10 +979,8 @@ if uploaded_file is not None:
             st.error(f"Error opening database: {e}")
         finally:
             os.unlink(db_path)
-
     elif file_extension == "bin":
         st.markdown('#### 🗂️ Binary (Hex) Viewer')
-        import binascii
         content = uploaded_file.read()
         # --- Stats ---
         st.markdown('**Stats**')
@@ -1021,7 +1013,6 @@ if uploaded_file is not None:
                     found = True
             if not found:
                 st.warning('Not found.')
-
     else:
         st.markdown('#### 🗂️ Fallback Viewer')
         try:

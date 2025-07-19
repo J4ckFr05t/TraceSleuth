@@ -13,3 +13,4 @@ rapidfuzz
 python-evtx
 pyshark
 pyvis
+duckdb
