@@ -262,15 +262,20 @@ if uploaded_file is not None:
                 if ioc_candidates:
                     st.write(f"Found {len(ioc_candidates)} unique IOCs to check for hits...")
                     
+                    # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                    # For each enrichment block, do this:
+
+                    # Example for one enrichment block:
+                    keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                     @lru_cache(maxsize=512)
                     def enrich_all(ioc):
                         result = {"IOC": ioc, "Type": detect_type(ioc)}
-                        result.update(enrich_otx(ioc))
-                        result.update(enrich_vt(ioc))
-                        result.update(enrich_greynoise(ioc))
+                        result.update(enrich_otx(ioc, keys=keys))
+                        result.update(enrich_vt(ioc, keys=keys))
+                        result.update(enrich_greynoise(ioc, keys=keys))
                         try:
                             from utils.api_clients import enrich_ipinfo
-                            result.update(enrich_ipinfo(ioc))
+                            result.update(enrich_ipinfo(ioc, keys=keys))
                         except ImportError:
                             pass
                         return result
@@ -765,16 +770,20 @@ if uploaded_file is not None:
                     if enrich_button:
                         st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
                         
+                        # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                        # For each enrichment block, do this:
+
+                        # Example for one enrichment block:
+                        keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
-                            result.update(enrich_otx(ioc))
-                            result.update(enrich_vt(ioc))
-                            result.update(enrich_greynoise(ioc))
-                            # Optionally add enrich_ipinfo if available
+                            result.update(enrich_otx(ioc, keys=keys))
+                            result.update(enrich_vt(ioc, keys=keys))
+                            result.update(enrich_greynoise(ioc, keys=keys))
                             try:
                                 from utils.api_clients import enrich_ipinfo
-                                result.update(enrich_ipinfo(ioc))
+                                result.update(enrich_ipinfo(ioc, keys=keys))
                             except ImportError:
                                 pass
                             return result
@@ -876,15 +885,20 @@ if uploaded_file is not None:
                     st.markdown('**IOC Enrichment**')
                     enrich_button = st.button('Run IOC Enrichment (JSONL)', key='jsonl_enrich')
                     if enrich_button:
+                        # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                        # For each enrichment block, do this:
+
+                        # Example for one enrichment block:
+                        keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
-                            result.update(enrich_otx(ioc))
-                            result.update(enrich_vt(ioc))
-                            result.update(enrich_greynoise(ioc))
+                            result.update(enrich_otx(ioc, keys=keys))
+                            result.update(enrich_vt(ioc, keys=keys))
+                            result.update(enrich_greynoise(ioc, keys=keys))
                             try:
                                 from utils.api_clients import enrich_ipinfo
-                                result.update(enrich_ipinfo(ioc))
+                                result.update(enrich_ipinfo(ioc, keys=keys))
                             except ImportError:
                                 pass
                             return result
@@ -985,15 +999,20 @@ if uploaded_file is not None:
                         st.markdown('**IOC Enrichment**')
                         enrich_button = st.button('Run IOC Enrichment (JSON)', key='json_enrich')
                         if enrich_button:
+                            # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                            # For each enrichment block, do this:
+
+                            # Example for one enrichment block:
+                            keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                             @lru_cache(maxsize=512)
                             def enrich_all(ioc):
                                 result = {"IOC": ioc, "Type": detect_type(ioc)}
-                                result.update(enrich_otx(ioc))
-                                result.update(enrich_vt(ioc))
-                                result.update(enrich_greynoise(ioc))
+                                result.update(enrich_otx(ioc, keys=keys))
+                                result.update(enrich_vt(ioc, keys=keys))
+                                result.update(enrich_greynoise(ioc, keys=keys))
                                 try:
                                     from utils.api_clients import enrich_ipinfo
-                                    result.update(enrich_ipinfo(ioc))
+                                    result.update(enrich_ipinfo(ioc, keys=keys))
                                 except ImportError:
                                     pass
                                 return result
@@ -1117,15 +1136,20 @@ if uploaded_file is not None:
                 st.markdown('**IOC Enrichment**')
                 enrich_button = st.button('Run IOC Enrichment (XML)', key='xml_enrich')
                 if enrich_button:
+                    # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                    # For each enrichment block, do this:
+
+                    # Example for one enrichment block:
+                    keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                     @lru_cache(maxsize=512)
                     def enrich_all(ioc):
                         result = {"IOC": ioc, "Type": detect_type(ioc)}
-                        result.update(enrich_otx(ioc))
-                        result.update(enrich_vt(ioc))
-                        result.update(enrich_greynoise(ioc))
+                        result.update(enrich_otx(ioc, keys=keys))
+                        result.update(enrich_vt(ioc, keys=keys))
+                        result.update(enrich_greynoise(ioc, keys=keys))
                         try:
                             from utils.api_clients import enrich_ipinfo
-                            result.update(enrich_ipinfo(ioc))
+                            result.update(enrich_ipinfo(ioc, keys=keys))
                         except ImportError:
                             pass
                         return result
@@ -1220,15 +1244,20 @@ if uploaded_file is not None:
                 st.markdown('**IOC Enrichment**')
                 enrich_button = st.button('Run IOC Enrichment (CSV)', key='csv_enrich')
                 if enrich_button:
+                    # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                    # For each enrichment block, do this:
+
+                    # Example for one enrichment block:
+                    keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                     @lru_cache(maxsize=512)
                     def enrich_all(ioc):
                         result = {"IOC": ioc, "Type": detect_type(ioc)}
-                        result.update(enrich_otx(ioc))
-                        result.update(enrich_vt(ioc))
-                        result.update(enrich_greynoise(ioc))
+                        result.update(enrich_otx(ioc, keys=keys))
+                        result.update(enrich_vt(ioc, keys=keys))
+                        result.update(enrich_greynoise(ioc, keys=keys))
                         try:
                             from utils.api_clients import enrich_ipinfo
-                            result.update(enrich_ipinfo(ioc))
+                            result.update(enrich_ipinfo(ioc, keys=keys))
                         except ImportError:
                             pass
                         return result
@@ -1639,10 +1668,6 @@ if uploaded_file is not None:
             if 'parsed_df' in st.session_state:
                 df = st.session_state.parsed_df
                 
-                # Preview
-                st.markdown("##### 📊 Parsed Data Preview")
-                st.dataframe(df.head(10), use_container_width=True)
-                
                 # Full data with filters
                 st.markdown("##### 📋 Full Dataset")
                 filter_val = st.text_input('Search/filter data:', '')
@@ -1663,15 +1688,20 @@ if uploaded_file is not None:
                     st.markdown('##### 🔎 IOC Enrichment')
                     enrich_button = st.button('Run IOC Enrichment (Custom Parser)')
                     if enrich_button:
+                        # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                        # For each enrichment block, do this:
+
+                        # Example for one enrichment block:
+                        keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
-                            result.update(enrich_otx(ioc))
-                            result.update(enrich_vt(ioc))
-                            result.update(enrich_greynoise(ioc))
+                            result.update(enrich_otx(ioc, keys=keys))
+                            result.update(enrich_vt(ioc, keys=keys))
+                            result.update(enrich_greynoise(ioc, keys=keys))
                             try:
                                 from utils.api_clients import enrich_ipinfo
-                                result.update(enrich_ipinfo(ioc))
+                                result.update(enrich_ipinfo(ioc, keys=keys))
                             except ImportError:
                                 pass
                             return result
