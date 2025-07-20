@@ -1,4 +1,87 @@
 import streamlit as st
+import time
+
+# Show loader only on first load
+if "loaded" not in st.session_state:
+    st.session_state.loaded = False
+
+if not st.session_state.loaded:
+    loader_html = """
+    <style>
+    /* Fullscreen overlay */
+    #ts-loader-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        width: 100vw; height: 100vh;
+        background: #111; /* or #fff for white */
+        z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    #ts-loader-overlay .loader {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 6rem;
+        height: 6rem;
+    }
+    #ts-loader-overlay .loader:before,
+    #ts-loader-overlay .loader:after {
+        content: "";
+        position: absolute;
+        border-radius: 50%;
+        animation: pulsOut 1.8s ease-in-out infinite;
+        filter: drop-shadow(0 0 1rem rgba(255,255,255,0.75));
+    }
+    #ts-loader-overlay .loader:before {
+        width: 100%;
+        height: 100%;
+        box-shadow: inset 0 0 0 1rem #fff;
+        animation-name: pulsIn;
+    }
+    #ts-loader-overlay .loader:after {
+        width: calc(100% - 2rem);
+        height: calc(100% - 2rem);
+        box-shadow: 0 0 0 0 #fff;
+    }
+    @keyframes pulsIn {
+        0% {
+            box-shadow: inset 0 0 0 1rem #fff;
+            opacity: 1;
+        }
+        50%, 100% {
+            box-shadow: inset 0 0 0 0 #fff;
+            opacity: 0;
+        }
+    }
+    @keyframes pulsOut {
+        0%, 50% {
+            box-shadow: 0 0 0 0 #fff;
+            opacity: 0;
+        }
+        100% {
+            box-shadow: 0 0 0 1rem #fff;
+            opacity: 1;
+        }
+    }
+    /* Hide Streamlit sidebar and main content while loading */
+    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stAppViewContainer"] > div:first-child {
+        filter: blur(2px);
+        pointer-events: none;
+        user-select: none;
+    }
+    </style>
+    <div id="ts-loader-overlay">
+        <div class="loader"></div>
+    </div>
+    """
+    st.markdown(loader_html, unsafe_allow_html=True)
+    time.sleep(1.5)
+    st.session_state.loaded = True
+    st.rerun()
+
 st.set_page_config(page_title="TraceSleuth", page_icon="static/favicon_io/favicon-32x32.png", layout="wide")
 
 st.title("Welcome to TraceSleuth!")
