@@ -5,6 +5,7 @@ from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoi
 from concurrent.futures import ThreadPoolExecutor
 import plotly.graph_objects as go
 
+
 def shorten_labels(label, max_len=20):
     """Truncates long labels."""
     if len(str(label)) > max_len:
@@ -129,18 +130,17 @@ if st.button("🧠 Enrich IOCs"):
     if ioc_list:
         with st.spinner(f"Enriching {len(ioc_list)} IOCs... This may take a moment."):
             results = []
-
+            keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
             def enrich(ioc):
                 result = {
                     "IOC": ioc,
                     "Type": detect_type(ioc),
                 }
-                result.update(enrich_otx(ioc))
-                result.update(enrich_vt(ioc))
-                result.update(enrich_greynoise(ioc))
-                result.update(enrich_ipinfo(ioc))
+                result.update(enrich_otx(ioc, keys=keys))
+                result.update(enrich_vt(ioc, keys=keys))
+                result.update(enrich_greynoise(ioc, keys=keys))
+                result.update(enrich_ipinfo(ioc, keys=keys))
                 return result
-
             with ThreadPoolExecutor(max_workers=10) as executor:
                 enriched = list(executor.map(enrich, ioc_list))
 
