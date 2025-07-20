@@ -65,6 +65,10 @@ if uploaded_file is not None:
     st.success(f"Successfully uploaded '{uploaded_file.name}' ({file_type}).")
 
     if file_extension == "evtx":
+        try:
+            from Evtx.Evtx import Evtx
+        except ImportError:
+            Evtx = None
         if Evtx is None:
             st.error("python-evtx is not installed. Please install it using 'pip install python-evtx'.")
         else:
