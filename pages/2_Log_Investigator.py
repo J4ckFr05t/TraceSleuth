@@ -249,38 +249,129 @@ if uploaded_file is not None:
                     st.info('No process ancestry chains found.')
 
                 # --- IOC HIT ENRICHMENT ---
-                @lru_cache(maxsize=512)
-                def enrich_all(ioc):
-                    otx = enrich_otx(ioc)
-                    vt = enrich_vt(ioc)
-                    gn = enrich_greynoise(ioc)
-                    return otx, vt, gn
-
-                def is_ioc_hit(ioc):
-                    otx, vt, gn = enrich_all(ioc)
-                    if otx.get('OTX_Malicious') is True:
-                        return True
-                    if isinstance(vt.get('VT_Malicious'), int) and vt.get('VT_Malicious', 0) > 0:
-                        return True
-                    if str(gn.get('GN_Classification', '')).lower() == 'malicious':
-                        return True
-                    return False
-
-                # For each row, scan all fields for IOCs and set IOC_Hit if any are flagged
-                for idx, row in df.iterrows():
-                    ioc_found = False
-                    for value in row.values:
-                        if not isinstance(value, str):
-                            continue
+                st.markdown('#### 🔎 IOC Hit Detection')
+                
+                # Collect all unique IOCs from the dataframe
+                ioc_candidates = set()
+                for value in df.astype(str).values.flatten():
+                    if isinstance(value, str) and value.strip():
                         ioc_type = detect_type(value)
                         if ioc_type in ("IP", "Hash", "Domain"):
+                            ioc_candidates.add(value.strip())
+                
+                if ioc_candidates:
+                    st.write(f"Found {len(ioc_candidates)} unique IOCs to check for hits...")
+                    
+                    @lru_cache(maxsize=512)
+                    def enrich_all(ioc):
+                        result = {"IOC": ioc, "Type": detect_type(ioc)}
+                        result.update(enrich_otx(ioc))
+                        result.update(enrich_vt(ioc))
+                        result.update(enrich_greynoise(ioc))
+                        try:
+                            from utils.api_clients import enrich_ipinfo
+                            result.update(enrich_ipinfo(ioc))
+                        except ImportError:
+                            pass
+                        return result
+
+                    def is_ioc_hit(enrichment_result):
+                        otx_malicious = enrichment_result.get('OTX_Malicious', False)
+                        vt_malicious = enrichment_result.get('VT_Malicious', 0)
+                        gn_class = str(enrichment_result.get('GN_Classification', '')).lower()
+                        
+                        if otx_malicious is True:
+                            return True
+                        if isinstance(vt_malicious, int) and vt_malicious > 0:
+                            return True
+                        if gn_class == 'malicious':
+                            return True
+                        return False
+
+                    # Parallel enrichment with progress bar
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    enriched_results = {}
+                    ioc_list = list(ioc_candidates)
+                    
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        # Submit all tasks
+                        future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                        
+                        # Process completed tasks with progress updates
+                        for i, future in enumerate(future_to_ioc):
                             try:
-                                if is_ioc_hit(value):
+                                result = future.result()
+                                enriched_results[result['IOC']] = result
+                                progress = (i + 1) / len(ioc_list)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                            except Exception as e:
+                                st.warning(f"Error enriching IOC: {e}")
+                                continue
+                    
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    # Create a mapping of IOCs to their hit status
+                    ioc_hit_map = {ioc: is_ioc_hit(result) for ioc, result in enriched_results.items()}
+                    
+                    # Update the dataframe with IOC hits
+                    for idx, row in df.iterrows():
+                        ioc_found = False
+                        for value in row.values:
+                            if isinstance(value, str) and value.strip() in ioc_hit_map:
+                                if ioc_hit_map[value.strip()]:
                                     ioc_found = True
                                     break
-                            except Exception as e:
-                                continue
-                    df.at[idx, 'IOC_Hit'] = ioc_found
+                        df.at[idx, 'IOC_Hit'] = ioc_found
+                    
+                    # Show enrichment results summary
+                    hit_count = sum(ioc_hit_map.values())
+                    st.success(f"✅ IOC enrichment completed! Found {hit_count} malicious IOCs out of {len(ioc_candidates)} total IOCs.")
+                    
+                    # Display detailed enrichment results
+                    if enriched_results:
+                        st.markdown('##### 📊 IOC Enrichment Results')
+                        df_enrich = pd.DataFrame(list(enriched_results.values()))
+                        
+                        # Add navigation links
+                        df_enrich['VT'] = df_enrich.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['IOC']}", axis=1)
+                        df_enrich['OTX'] = df_enrich.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['IOC']}", axis=1)
+                        df_enrich['GN'] = df_enrich.apply(
+                            lambda row: f"https://www.greynoise.io/viz/ip/{row['IOC']}" if 'ip' in row['Type'].lower() else None,
+                            axis=1
+                        )
+                        
+                        # Define column configuration for links
+                        column_config = {
+                            "IOC": st.column_config.TextColumn(help="The original IOC (IP, domain, or hash)"),
+                            "Type": st.column_config.TextColumn(help="Automatically detected type of the indicator"),
+                            "VT": st.column_config.LinkColumn(
+                                "VirusTotal",
+                                display_text="VT",
+                                help="Pivots to the VirusTotal report"
+                            ),
+                            "OTX": st.column_config.LinkColumn(
+                                "OTX",
+                                display_text="OTX",
+                                help="Pivots to the OTX report"
+                            ),
+                            "GN": st.column_config.LinkColumn(
+                                "GreyNoise",
+                                display_text="GN",
+                                help="Pivots to the GreyNoise report"
+                            ),
+                        }
+                        
+                        # Reorder columns to show links first
+                        final_column_order = ['IOC', 'Type', 'VT', 'OTX', 'GN'] + [col for col in df_enrich.columns if col not in ['IOC', 'Type', 'VT', 'OTX', 'GN']]
+                        
+                        st.dataframe(df_enrich[final_column_order], use_container_width=True, column_config=column_config)
+                else:
+                    st.info("No IOCs found in the event data for enrichment.")
             else:
                 st.info("No events found in the uploaded EVTX file.")
     elif file_extension in ["pcap", "pcapng"]:
@@ -673,6 +764,7 @@ if uploaded_file is not None:
                     enrich_button = st.button('Run IOC Enrichment', key='pcap_enrich')
                     if enrich_button:
                         st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
+                        
                         @lru_cache(maxsize=512)
                         def enrich_all(ioc):
                             result = {"IOC": ioc, "Type": detect_type(ioc)}
@@ -686,13 +778,33 @@ if uploaded_file is not None:
                             except ImportError:
                                 pass
                             return result
+                        
+                        # Parallel enrichment with progress bar
                         progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
                         enriched = []
+                        
                         with ThreadPoolExecutor(max_workers=10) as executor:
-                            futures = list(executor.map(enrich_all, ioc_list))
-                            for i, res in enumerate(futures):
-                                enriched.append(res)
-                                progress_bar.progress((i + 1) / len(ioc_list))
+                            # Submit all tasks
+                            future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                            
+                            # Process completed tasks with progress updates
+                            for i, future in enumerate(future_to_ioc):
+                                try:
+                                    result = future.result()
+                                    enriched.append(result)
+                                    progress = (i + 1) / len(ioc_list)
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                except Exception as e:
+                                    st.warning(f"Error enriching IOC: {e}")
+                                    continue
+                        
+                        # Clear progress indicators
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         df_enrich = pd.DataFrame(enriched)
                         
                         # Add navigation links
@@ -776,14 +888,34 @@ if uploaded_file is not None:
                             except ImportError:
                                 pass
                             return result
+                        
+                        # Parallel enrichment with progress bar
                         progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
                         enriched = []
                         ioc_list = list(ioc_candidates)
+                        
                         with ThreadPoolExecutor(max_workers=10) as executor:
-                            futures = list(executor.map(enrich_all, ioc_list))
-                            for i, res in enumerate(futures):
-                                enriched.append(res)
-                                progress_bar.progress((i + 1) / len(ioc_list))
+                            # Submit all tasks
+                            future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                            
+                            # Process completed tasks with progress updates
+                            for i, future in enumerate(future_to_ioc):
+                                try:
+                                    result = future.result()
+                                    enriched.append(result)
+                                    progress = (i + 1) / len(ioc_list)
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                except Exception as e:
+                                    st.warning(f"Error enriching IOC: {e}")
+                                    continue
+                        
+                        # Clear progress indicators
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         df_enrich = pd.DataFrame(enriched)
                         
                         # Add navigation links
@@ -865,14 +997,34 @@ if uploaded_file is not None:
                                 except ImportError:
                                     pass
                                 return result
+                            
+                            # Parallel enrichment with progress bar
                             progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
                             enriched = []
                             ioc_list = list(ioc_candidates)
+                            
                             with ThreadPoolExecutor(max_workers=10) as executor:
-                                futures = list(executor.map(enrich_all, ioc_list))
-                                for i, res in enumerate(futures):
-                                    enriched.append(res)
-                                    progress_bar.progress((i + 1) / len(ioc_list))
+                                # Submit all tasks
+                                future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                                
+                                # Process completed tasks with progress updates
+                                for i, future in enumerate(future_to_ioc):
+                                    try:
+                                        result = future.result()
+                                        enriched.append(result)
+                                        progress = (i + 1) / len(ioc_list)
+                                        progress_bar.progress(progress)
+                                        status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                    except Exception as e:
+                                        st.warning(f"Error enriching IOC: {e}")
+                                        continue
+                            
+                            # Clear progress indicators
+                            progress_bar.empty()
+                            status_text.empty()
+                            
                             df_enrich = pd.DataFrame(enriched)
                             
                             # Add navigation links
@@ -977,14 +1129,34 @@ if uploaded_file is not None:
                         except ImportError:
                             pass
                         return result
+                    
+                    # Parallel enrichment with progress bar
                     progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
                     enriched = []
                     ioc_list = list(ioc_candidates)
+                    
                     with ThreadPoolExecutor(max_workers=10) as executor:
-                        futures = list(executor.map(enrich_all, ioc_list))
-                        for i, res in enumerate(futures):
-                            enriched.append(res)
-                            progress_bar.progress((i + 1) / len(ioc_list))
+                        # Submit all tasks
+                        future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                        
+                        # Process completed tasks with progress updates
+                        for i, future in enumerate(future_to_ioc):
+                            try:
+                                result = future.result()
+                                enriched.append(result)
+                                progress = (i + 1) / len(ioc_list)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                            except Exception as e:
+                                st.warning(f"Error enriching IOC: {e}")
+                                continue
+                    
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
+                    
                     df_enrich = pd.DataFrame(enriched)
                     
                     # Add navigation links
@@ -1060,14 +1232,34 @@ if uploaded_file is not None:
                         except ImportError:
                             pass
                         return result
+                    
+                    # Parallel enrichment with progress bar
                     progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
                     enriched = []
                     ioc_list = list(ioc_candidates)
+                    
                     with ThreadPoolExecutor(max_workers=10) as executor:
-                        futures = list(executor.map(enrich_all, ioc_list))
-                        for i, res in enumerate(futures):
-                            enriched.append(res)
-                            progress_bar.progress((i + 1) / len(ioc_list))
+                        # Submit all tasks
+                        future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                        
+                        # Process completed tasks with progress updates
+                        for i, future in enumerate(future_to_ioc):
+                            try:
+                                result = future.result()
+                                enriched.append(result)
+                                progress = (i + 1) / len(ioc_list)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                            except Exception as e:
+                                st.warning(f"Error enriching IOC: {e}")
+                                continue
+                    
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
+                    
                     df_enrich = pd.DataFrame(enriched)
                     
                     # Add navigation links
@@ -1484,14 +1676,33 @@ if uploaded_file is not None:
                                 pass
                             return result
                         
+                        # Parallel enrichment with progress bar
                         progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
                         enriched = []
                         ioc_list = list(ioc_candidates)
+                        
                         with ThreadPoolExecutor(max_workers=10) as executor:
-                            futures = list(executor.map(enrich_all, ioc_list))
-                            for i, res in enumerate(futures):
-                                enriched.append(res)
-                                progress_bar.progress((i + 1) / len(ioc_list))
+                            # Submit all tasks
+                            future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                            
+                            # Process completed tasks with progress updates
+                            for i, future in enumerate(future_to_ioc):
+                                try:
+                                    result = future.result()
+                                    enriched.append(result)
+                                    progress = (i + 1) / len(ioc_list)
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                except Exception as e:
+                                    st.warning(f"Error enriching IOC: {e}")
+                                    continue
+                        
+                        # Clear progress indicators
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         df_enrich = pd.DataFrame(enriched)
                         
                         # Add navigation links
@@ -1527,26 +1738,6 @@ if uploaded_file is not None:
                         final_column_order = ['IOC', 'Type', 'VT', 'OTX', 'GN'] + [col for col in df_enrich.columns if col not in ['IOC', 'Type', 'VT', 'OTX', 'GN']]
                         
                         st.dataframe(df_enrich[final_column_order], use_container_width=True, column_config=column_config)
-                
-                # Export options
-                st.markdown("##### 💾 Export Options")
-                col1, col2 = st.columns(2)
-                with col1:
-                    csv_data = df.to_csv(index=False)
-                    st.download_button(
-                        label="Download as CSV",
-                        data=csv_data,
-                        file_name=f"{st.session_state.parsed_file_name}_parsed.csv",
-                        mime="text/csv"
-                    )
-                with col2:
-                    json_data = df.to_json(orient='records', indent=2)
-                    st.download_button(
-                        label="Download as JSON",
-                        data=json_data,
-                        file_name=f"{st.session_state.parsed_file_name}_parsed.json",
-                        mime="application/json"
-                    )
         else:
             # Original fallback viewer
             st.markdown('#### 🗂️ Fallback Viewer')
