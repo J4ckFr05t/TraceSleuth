@@ -1,10 +1,5 @@
 import streamlit as st
-
-st.set_page_config(
-    page_title="TraceSleuth",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="TraceSleuth", page_icon="static/favicon_io/favicon-32x32.png", layout="wide")
 
 st.title("Welcome to TraceSleuth!")
 

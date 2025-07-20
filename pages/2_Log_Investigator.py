@@ -21,18 +21,9 @@ import binascii
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-try:
-    from Evtx.Evtx import Evtx
-except ImportError:
-    Evtx = None
-    st.warning("python-evtx is not installed. Please install it to parse .evtx files.")
+st.set_page_config(page_title="Log Investigator", page_icon="static/favicon_io/favicon-32x32.png", layout="wide")
 
-st.set_page_config(
-    page_title="Log Investigator",
-    layout="wide"
-)
-
-st.title("Log Investigator")
+st.title("🔍 Log Investigator")
 
 st.write("This module is for investigating logs.") 
 

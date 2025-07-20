@@ -1,4 +1,5 @@
 import streamlit as st
+st.set_page_config(page_title="IOC Enrichment", page_icon="static/favicon_io/favicon-32x32.png", layout="wide")
 import pandas as pd
 import pydeck as pdk
 from utils.api_clients import detect_type, enrich_otx, enrich_vt, enrich_greynoise, enrich_ipinfo
