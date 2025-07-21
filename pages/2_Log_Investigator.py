@@ -879,7 +879,9 @@ if uploaded_file is not None:
                                 'Destination IP': dst_ip,
                                 'Destination Port': dst_port,
                                 'Length': len(pkt),
-                                # No Host/Domain, URI, User-Agent fields in scapy fallback
+                                'Host/Domain': None,
+                                'URI': None,
+                                'User-Agent': None,
                             })
                     if not flows:
                         st.warning("No flows/packets extracted from the PCAP file.")
