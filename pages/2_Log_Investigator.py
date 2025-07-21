@@ -870,7 +870,7 @@ if uploaded_file is not None:
                             dst_ip = pkt[IP].dst
                             src_port = pkt[TCP].sport if TCP in pkt else (pkt[UDP].sport if UDP in pkt else None)
                             dst_port = pkt[TCP].dport if TCP in pkt else (pkt[UDP].dport if UDP in pkt else None)
-                            ts = datetime.datetime.fromtimestamp(pkt.time)
+                            ts = datetime.datetime.fromtimestamp(float(pkt.time))  # <-- fix here
                             flows.append({
                                 'Timestamp': ts,
                                 'Protocol': proto,
