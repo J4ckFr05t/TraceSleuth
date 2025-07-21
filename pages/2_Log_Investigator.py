@@ -20,6 +20,7 @@ import xml.dom.minidom
 import binascii
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
+import shutil
 
 st.set_page_config(page_title="Log Investigator", page_icon="static/favicon_io/favicon-32x32.png", layout="wide")
 
@@ -375,481 +376,934 @@ if uploaded_file is not None:
             else:
                 st.info("No events found in the uploaded EVTX file.")
     elif file_extension in ["pcap", "pcapng"]:
-        import pyshark
+        import shutil
         st.markdown("---")
         st.markdown("### 🕸️ Network Flow Extraction (PCAP/PCAPNG)")
         with tempfile.NamedTemporaryFile(delete=True, suffix=f'.{file_extension}') as tmpfile:
             tmpfile.write(uploaded_file.read())
             tmpfile.flush()
-            st.info("Parsing network flows, this may take a moment for large files...")
-            try:
-                cap = pyshark.FileCapture(tmpfile.name, only_summaries=False)
-                flows = []
-                for pkt in cap:
-                    try:
-                        ts = pd.to_datetime(pkt.sniff_time)
-                        proto = getattr(pkt, 'highest_layer', None) or getattr(pkt, 'transport_layer', None) or 'Unknown'
-                        src_ip = getattr(pkt, 'ip', None)
-                        src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
-                        dst_ip = getattr(pkt, 'ip', None)
-                        dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
-                        src_port = getattr(pkt, 'tcp', None)
-                        src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, 'udp', None)
-                        if src_port and hasattr(src_port, 'srcport'):
-                            src_port = src_port.srcport
-                        else:
-                            src_port = getattr(pkt, 'tcp.srcport', None) or getattr(pkt, 'udp.srcport', None)
-                        dst_port = getattr(pkt, 'tcp', None)
-                        dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, 'udp', None)
-                        if dst_port and hasattr(dst_port, 'dstport'):
-                            dst_port = dst_port.dstport
-                        else:
-                            dst_port = getattr(pkt, 'tcp.dstport', None) or getattr(pkt, 'udp.dstport', None)
-                        length = int(getattr(pkt, 'length', 0)) if hasattr(pkt, 'length') else None
-                        # HTTP/DNS fields
-                        host = uri = user_agent = None
-                        if 'HTTP' in proto and hasattr(pkt.http, 'host'):
-                            host = getattr(pkt.http, 'host', None)
-                            uri = getattr(pkt.http, 'request_full_uri', None)
-                            user_agent = getattr(pkt.http, 'user_agent', None)
-                        if 'DNS' in proto and hasattr(pkt.dns, 'qry_name'):
-                            host = getattr(pkt.dns, 'qry_name', None)
-                        flows.append({
-                            'Timestamp': ts,
-                            'Protocol': proto,
-                            'Source IP': src_ip,
-                            'Source Port': src_port,
-                            'Destination IP': dst_ip,
-                            'Destination Port': dst_port,
-                            'Length': length,
-                            'Host/Domain': host,
-                            'URI': uri,
-                            'User-Agent': user_agent
-                        })
-                    except Exception as e:
-                        continue
-                cap.close()
-                if not flows:
-                    st.warning("No flows/packets extracted from the PCAP file.")
-                else:
-                    df = pd.DataFrame(flows)
-                    # --- Filters ---
-                    st.markdown('#### Filters')
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        proto_options = df['Protocol'].dropna().unique().tolist()
-                        filter_proto = st.multiselect('Protocol', proto_options, default=proto_options)
-                    with col2:
-                        dst_ip_options = df['Destination IP'].dropna().unique().tolist()
-                        filter_dst_ip = st.multiselect('Destination IP', dst_ip_options, default=dst_ip_options)
-                    with col3:
-                        filter_dns_http = st.checkbox('Show only DNS/HTTP traffic', value=False)
-                    filtered_df = df.copy()
-                    if filter_proto:
-                        filtered_df = filtered_df[filtered_df['Protocol'].isin(filter_proto)]
-                    if filter_dst_ip:
-                        filtered_df = filtered_df[filtered_df['Destination IP'].isin(filter_dst_ip)]
-                    if filter_dns_http:
-                        filtered_df = filtered_df[filtered_df['Protocol'].isin(['HTTP', 'DNS'])]
-                    st.markdown('#### Network Flows Table')
-                    st.dataframe(filtered_df, use_container_width=True)
-                    # --- Timeline Chart ---
-                    st.markdown('#### 📈 Timeline of Connections')
-                    if not filtered_df.empty:
-                        timeline_df = filtered_df.copy()
-                        timeline_df['Minute'] = timeline_df['Timestamp'].dt.floor('min')
-                        timeline_counts = timeline_df.groupby('Minute').size().reset_index(name='Count')
-                        chart = alt.Chart(timeline_counts).mark_line(point=True).encode(
-                            x=alt.X('Minute:T', title='Time'),
-                            y=alt.Y('Count:Q', title='Number of Flows'),
-                            tooltip=['Minute', 'Count']
-                        ).properties(height=300)
-                        st.altair_chart(chart, use_container_width=True)
-                    # --- Protocol Distribution Charts ---
-                    st.markdown('#### 🥧 Protocol Distribution')
-                    
-                    # Calculate protocol statistics
-                    proto_counts = filtered_df['Protocol'].value_counts().reset_index()
-                    proto_counts.columns = ['Protocol', 'Count']
-                    total_packets = proto_counts['Count'].sum()
-                    proto_counts['Percentage'] = (proto_counts['Count'] / total_packets * 100).round(1)
-                    proto_counts['Label'] = proto_counts['Protocol'] + ' (' + proto_counts['Percentage'].astype(str) + '%)'
-                    
-                    # Bar chart showing percentages
-                    bar = alt.Chart(proto_counts).mark_bar().encode(
-                        x=alt.X('Percentage:Q', title='Percentage (%)'),
-                        y=alt.Y('Protocol:N', title='Protocol', sort='-x'),
-                        color=alt.Color('Protocol:N', legend=None),
-                        tooltip=[
-                            alt.Tooltip('Protocol:N', title='Protocol'),
-                            alt.Tooltip('Count:Q', title='Count'),
-                            alt.Tooltip('Percentage:Q', title='Percentage', format='.1f')
-                        ]
-                    ).properties(height=400, title='Protocol Distribution by Percentage')
-                    
-                    # Add percentage labels on bars
-                    bar_text = alt.Chart(proto_counts).mark_text(
-                        align='left',
-                        baseline='middle',
-                        dx=5,
-                        fontSize=11,
-                        fontWeight='bold'
-                    ).encode(
-                        x=alt.X('Percentage:Q'),
-                        y=alt.Y('Protocol:N', sort='-x'),
-                        text=alt.Text('Percentage:Q', format='.1f')
-                    )
-                    
-                    bar_chart = alt.layer(bar, bar_text)
-                    st.altair_chart(bar_chart, use_container_width=True)
-                    
-                    # Summary statistics
-                    st.markdown('##### 📊 Protocol Summary')
-                    summary_col1, summary_col2, summary_col3 = st.columns(3)
-                    with summary_col1:
-                        st.metric("Total Packets", f"{total_packets:,}")
-                    with summary_col2:
-                        st.metric("Unique Protocols", len(proto_counts))
-                    with summary_col3:
-                        top_protocol = proto_counts.iloc[0]
-                        st.metric("Most Common", f"{top_protocol['Protocol']} ({top_protocol['Percentage']:.1f}%)")
-                    # --- Source-Destination Graph (Improved: Internal/External Separation) ---
-                    st.markdown('#### 🌐 Source-Destination Graphs (Internal ↔ External)')
-                    def is_internal(ip):
+            def tshark_available():
+                return shutil.which("tshark") is not None
+            if tshark_available():
+                try:
+                    import pyshark
+                    st.info("Parsing network flows with pyshark (TShark backend)...")
+                    cap = pyshark.FileCapture(tmpfile.name, only_summaries=False)
+                    flows = []
+                    for pkt in cap:
                         try:
-                            return ipaddress.ip_address(ip).is_private
-                        except Exception:
-                            return False
-
-                    # Prepare flows for graphing
-                    flow_counts = {}
-                    for _, row in filtered_df.iterrows():
-                        src = row['Source IP']
-                        dst = row['Destination IP']
-                        if src and dst and src != dst:
-                            key = (src, dst)
-                            flow_counts[key] = flow_counts.get(key, 0) + 1
-
-                    # Group flows
-                    internal_to_external = {}
-                    external_to_internal = {}
-                    for (src, dst), count in flow_counts.items():
-                        src_internal = is_internal(src)
-                        dst_internal = is_internal(dst)
-                        if src_internal and not dst_internal:
-                            internal_to_external[(src, dst)] = count
-                        elif not src_internal and dst_internal:
-                            external_to_internal[(src, dst)] = count
-
-                    # Helper to build and render a pyvis graph
-                    def build_pyvis_graph(flow_dict, direction_label):
-                        net = Network(height='500px', width='100%', bgcolor='#181818', font_color='white', directed=True)
-                        node_types = {}
-                        for (src, dst), count in flow_dict.items():
-                            for ip, is_int in [(src, is_internal(src)), (dst, is_internal(dst))]:
-                                if ip not in node_types:
-                                    node_types[ip] = is_int
-                        for ip, is_int in node_types.items():
-                            color = '#4FC3F7' if is_int else '#FF7043'  # blue for internal, orange for external
-                            net.add_node(ip, label=ip, color=color, font={'color': 'white'})
-                        max_count = max(flow_dict.values()) if flow_dict else 1
-                        for (src, dst), count in flow_dict.items():
-                            width = 1 + 6 * (count / max_count)  # 1-7 px
-                            net.add_edge(src, dst, value=count, title=f"{src} → {dst}<br>Packets: {count}", width=width, color='#BDBDBD')
-                        net.set_options('''
-                        var options = {
-                          "nodes": {
-                            "borderWidth": 2,
-                            "shadow": true,
-                            "font": { "color": "white", "size": 16 }
-                          },
-                          "edges": {
-                            "color": { "color": "#BDBDBD" },
-                            "smooth": true,
-                            "arrows": { "to": { "enabled": true, "scaleFactor": 0.7 } },
-                            "shadow": true
-                          },
-                          "layout": {
-                            "improvedLayout": true
-                          },
-                          "physics": {
-                            "enabled": true,
-                            "barnesHut": { "gravitationalConstant": -8000, "springLength": 120, "springConstant": 0.04 }
-                          },
-                          "interaction": {
-                            "hover": true,
-                            "tooltipDelay": 100
-                          },
-                          "manipulation": { "enabled": false },
-                          "autoResize": true
-                        }
-                        ''')
-                        html = net.generate_html()
-                        # Inject CSS to remove white border/background
-                        dark_css = '''<style>
-                        body { background: #181818 !important; }
-                        #mynetwork { background: #181818 !important; border: none !important; }
-                        .vis-network { background: #181818 !important; }
-                        div { border: none !important; }
-                        </style>'''
-                        if '</head>' in html:
-                            html = html.replace('</head>', f'{dark_css}</head>')
-                        else:
-                            html = dark_css + html
-                        return html
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown('**Internal → External**')
-                        if internal_to_external:
-                            net1 = build_pyvis_graph(internal_to_external, 'Internal → External')
-                            components.html(net1, height=520, scrolling=False)
-                        else:
-                            st.info('No Internal → External flows found.')
-                    with col2:
-                        st.markdown('**External → Internal**')
-                        if external_to_internal:
-                            net2 = build_pyvis_graph(external_to_internal, 'External → Internal')
-                            components.html(net2, height=520, scrolling=False)
-                        else:
-                            st.info('No External → Internal flows found.')
-                    
-                # --- Port Usage Analysis ---
-                st.markdown('#### 🔢 Port Usage Analysis')
-
-                # Extract relevant info for TCP/UDP packets
-                tcp_udp_rows = []
-                for pkt in cap:
-                    try:
-                        proto = getattr(pkt, 'transport_layer', None)
-                        if proto not in ('TCP', 'UDP'):
-                            continue
-                        src_ip = getattr(pkt, 'ip', None)
-                        src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
-                        dst_ip = getattr(pkt, 'ip', None)
-                        dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
-                        src_port = getattr(pkt, proto.lower(), None)
-                        src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, f'{proto.lower()}.srcport', None)
-                        dst_port = getattr(pkt, proto.lower(), None)
-                        dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, f'{proto.lower()}.dstport', None)
-                        if src_ip and dst_ip and src_port and dst_port:
-                            tcp_udp_rows.append({
+                            ts = pd.to_datetime(pkt.sniff_time)
+                            proto = getattr(pkt, 'highest_layer', None) or getattr(pkt, 'transport_layer', None) or 'Unknown'
+                            src_ip = getattr(pkt, 'ip', None)
+                            src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
+                            dst_ip = getattr(pkt, 'ip', None)
+                            dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
+                            src_port = getattr(pkt, 'tcp', None)
+                            src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, 'udp', None)
+                            if src_port and hasattr(src_port, 'srcport'):
+                                src_port = src_port.srcport
+                            else:
+                                src_port = getattr(pkt, 'tcp.srcport', None) or getattr(pkt, 'udp.srcport', None)
+                            dst_port = getattr(pkt, 'tcp', None)
+                            dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, 'udp', None)
+                            if dst_port and hasattr(dst_port, 'dstport'):
+                                dst_port = dst_port.dstport
+                            else:
+                                dst_port = getattr(pkt, 'tcp.dstport', None) or getattr(pkt, 'udp.dstport', None)
+                            length = int(getattr(pkt, 'length', 0)) if hasattr(pkt, 'length') else None
+                            # HTTP/DNS fields
+                            host = uri = user_agent = None
+                            if 'HTTP' in proto and hasattr(pkt.http, 'host'):
+                                host = getattr(pkt.http, 'host', None)
+                                uri = getattr(pkt.http, 'request_full_uri', None)
+                                user_agent = getattr(pkt.http, 'user_agent', None)
+                            if 'DNS' in proto and hasattr(pkt.dns, 'qry_name'):
+                                host = getattr(pkt.dns, 'qry_name', None)
+                            flows.append({
+                                'Timestamp': ts,
                                 'Protocol': proto,
                                 'Source IP': src_ip,
+                                'Source Port': src_port,
                                 'Destination IP': dst_ip,
-                                'Source Port': str(src_port),
-                                'Destination Port': str(dst_port)
+                                'Destination Port': dst_port,
+                                'Length': length,
+                                'Host/Domain': host,
+                                'URI': uri,
+                                'User-Agent': user_agent
                             })
-                    except Exception:
-                        continue
+                        except Exception as e:
+                            continue
+                    cap.close()
+                    if not flows:
+                        st.warning("No flows/packets extracted from the PCAP file.")
+                    else:
+                        df = pd.DataFrame(flows)
+                        # --- Filters ---
+                        st.markdown('#### Filters')
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            proto_options = df['Protocol'].dropna().unique().tolist()
+                            filter_proto = st.multiselect('Protocol', proto_options, default=proto_options)
+                        with col2:
+                            dst_ip_options = df['Destination IP'].dropna().unique().tolist()
+                            filter_dst_ip = st.multiselect('Destination IP', dst_ip_options, default=dst_ip_options)
+                        with col3:
+                            filter_dns_http = st.checkbox('Show only DNS/HTTP traffic', value=False)
+                        filtered_df = df.copy()
+                        if filter_proto:
+                            filtered_df = filtered_df[filtered_df['Protocol'].isin(filter_proto)]
+                        if filter_dst_ip:
+                            filtered_df = filtered_df[filtered_df['Destination IP'].isin(filter_dst_ip)]
+                        if filter_dns_http:
+                            filtered_df = filtered_df[filtered_df['Protocol'].isin(['HTTP', 'DNS'])]
+                        st.markdown('#### Network Flows Table')
+                        st.dataframe(filtered_df, use_container_width=True)
+                        # --- Timeline Chart ---
+                        st.markdown('#### 📈 Timeline of Connections')
+                        if not filtered_df.empty:
+                            timeline_df = filtered_df.copy()
+                            timeline_df['Minute'] = timeline_df['Timestamp'].dt.floor('min')
+                            timeline_counts = timeline_df.groupby('Minute').size().reset_index(name='Count')
+                            chart = alt.Chart(timeline_counts).mark_line(point=True).encode(
+                                x=alt.X('Minute:T', title='Time'),
+                                y=alt.Y('Count:Q', title='Number of Flows'),
+                                tooltip=['Minute', 'Count']
+                            ).properties(height=300)
+                            st.altair_chart(chart, use_container_width=True)
+                        # --- Protocol Distribution Charts ---
+                        st.markdown('#### 🥧 Protocol Distribution')
+                        
+                        # Calculate protocol statistics
+                        proto_counts = filtered_df['Protocol'].value_counts().reset_index()
+                        proto_counts.columns = ['Protocol', 'Count']
+                        total_packets = proto_counts['Count'].sum()
+                        proto_counts['Percentage'] = (proto_counts['Count'] / total_packets * 100).round(1)
+                        proto_counts['Label'] = proto_counts['Protocol'] + ' (' + proto_counts['Percentage'].astype(str) + '%)'
+                        
+                        # Bar chart showing percentages
+                        bar = alt.Chart(proto_counts).mark_bar().encode(
+                            x=alt.X('Percentage:Q', title='Percentage (%)'),
+                            y=alt.Y('Protocol:N', title='Protocol', sort='-x'),
+                            color=alt.Color('Protocol:N', legend=None),
+                            tooltip=[
+                                alt.Tooltip('Protocol:N', title='Protocol'),
+                                alt.Tooltip('Count:Q', title='Count'),
+                                alt.Tooltip('Percentage:Q', title='Percentage', format='.1f')
+                            ]
+                        ).properties(height=400, title='Protocol Distribution by Percentage')
+                        
+                        # Add percentage labels on bars
+                        bar_text = alt.Chart(proto_counts).mark_text(
+                            align='left',
+                            baseline='middle',
+                            dx=5,
+                            fontSize=11,
+                            fontWeight='bold'
+                        ).encode(
+                            x=alt.X('Percentage:Q'),
+                            y=alt.Y('Protocol:N', sort='-x'),
+                            text=alt.Text('Percentage:Q', format='.1f')
+                        )
+                        
+                        bar_chart = alt.layer(bar, bar_text)
+                        st.altair_chart(bar_chart, use_container_width=True)
+                        
+                        # Summary statistics
+                        st.markdown('##### 📊 Protocol Summary')
+                        summary_col1, summary_col2, summary_col3 = st.columns(3)
+                        with summary_col1:
+                            st.metric("Total Packets", f"{total_packets:,}")
+                        with summary_col2:
+                            st.metric("Unique Protocols", len(proto_counts))
+                        with summary_col3:
+                            top_protocol = proto_counts.iloc[0]
+                            st.metric("Most Common", f"{top_protocol['Protocol']} ({top_protocol['Percentage']:.1f}%)")
+                        # --- Source-Destination Graph (Improved: Internal/External Separation) ---
+                        st.markdown('#### 🌐 Source-Destination Graphs (Internal ↔ External)')
+                        def is_internal(ip):
+                            try:
+                                return ipaddress.ip_address(ip).is_private
+                            except Exception:
+                                return False
 
-                if tcp_udp_rows:
-                    port_df = pd.DataFrame(tcp_udp_rows)
-                    # Protocol filter
-                    proto_options = port_df['Protocol'].unique().tolist()
-                    proto_filter = st.multiselect('Protocol', proto_options, default=proto_options, key='port_proto_filter')
-                    filtered_port_df = port_df[port_df['Protocol'].isin(proto_filter)]
-                    # Toggle between source/destination port
-                    port_type = st.radio('Show Top Ports by:', ['Destination Port', 'Source Port'], horizontal=True)
-                    port_col = 'Destination Port' if port_type == 'Destination Port' else 'Source Port'
-                    # Aggregate counts
-                    agg = filtered_port_df.groupby(['Protocol', port_col]).size().reset_index(name='Packet Count')
-                    # Top N
-                    N = st.slider('Show Top N Ports', min_value=5, max_value=30, value=10, step=1)
-                    top_ports = agg.sort_values('Packet Count', ascending=False).head(N)
-                    # Bar chart
-                    bar_chart = alt.Chart(top_ports).mark_bar().encode(
-                        x=alt.X('Packet Count:Q', title='Packet Count'),
-                        y=alt.Y(f'{port_col}:N', title=port_col, sort='-x'),
-                        color=alt.Color('Protocol:N', legend=alt.Legend(title='Protocol')),
-                        tooltip=['Protocol', port_col, 'Packet Count']
-                    ).properties(height=400, title=f'Top {N} {port_type}s by Packet Count')
-                    st.altair_chart(bar_chart.configure(
-                        background='#181818',
-                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
-                        legend=alt.LegendConfig(labelColor='white', titleColor='white'),
-                        title=alt.TitleConfig(color='white')
-                    ), use_container_width=True)
-                    # Table
-                    st.markdown('##### Port Flow Table')
-                    flow_agg = filtered_port_df.groupby(['Source IP', 'Destination IP', 'Source Port', 'Destination Port', 'Protocol']).size().reset_index(name='Packet Count')
-                    st.dataframe(flow_agg, use_container_width=True, height=400)
-                else:
-                    st.info('No TCP/UDP packets found for port analysis.')
+                        # Prepare flows for graphing
+                        flow_counts = {}
+                        for _, row in filtered_df.iterrows():
+                            src = row['Source IP']
+                            dst = row['Destination IP']
+                            if src and dst and src != dst:
+                                key = (src, dst)
+                                flow_counts[key] = flow_counts.get(key, 0) + 1
 
-                # --- Packet Size Analysis ---
-                st.markdown('#### 📦 Packet Size Analysis')
+                        # Group flows
+                        internal_to_external = {}
+                        external_to_internal = {}
+                        for (src, dst), count in flow_counts.items():
+                            src_internal = is_internal(src)
+                            dst_internal = is_internal(dst)
+                            if src_internal and not dst_internal:
+                                internal_to_external[(src, dst)] = count
+                            elif not src_internal and dst_internal:
+                                external_to_internal[(src, dst)] = count
 
-                packet_sizes = []
-                timestamps = []
-                for pkt in cap:
-                    try:
-                        length = int(getattr(pkt, 'length', None) or getattr(pkt, 'frame_info', None) and getattr(pkt.frame_info, 'len', None) or getattr(pkt, 'frame.len', None) or 0)
-                        ts = getattr(pkt, 'sniff_time', None)
-                        if length > 0:
-                            packet_sizes.append(length)
-                            timestamps.append(ts)
-                    except Exception:
-                        continue
+                        # Helper to build and render a pyvis graph
+                        def build_pyvis_graph(flow_dict, direction_label):
+                            net = Network(height='500px', width='100%', bgcolor='#181818', font_color='white', directed=True)
+                            node_types = {}
+                            for (src, dst), count in flow_dict.items():
+                                for ip, is_int in [(src, is_internal(src)), (dst, is_internal(dst))]:
+                                    if ip not in node_types:
+                                        node_types[ip] = is_int
+                            for ip, is_int in node_types.items():
+                                color = '#4FC3F7' if is_int else '#FF7043'  # blue for internal, orange for external
+                                net.add_node(ip, label=ip, color=color, font={'color': 'white'})
+                            max_count = max(flow_dict.values()) if flow_dict else 1
+                            for (src, dst), count in flow_dict.items():
+                                width = 1 + 6 * (count / max_count)  # 1-7 px
+                                net.add_edge(src, dst, value=count, title=f"{src} → {dst}<br>Packets: {count}", width=width, color='#BDBDBD')
+                            net.set_options('''
+                            var options = {
+                              "nodes": {
+                                "borderWidth": 2,
+                                "shadow": true,
+                                "font": { "color": "white", "size": 16 }
+                              },
+                              "edges": {
+                                "color": { "color": "#BDBDBD" },
+                                "smooth": true,
+                                "arrows": { "to": { "enabled": true, "scaleFactor": 0.7 } },
+                                "shadow": true
+                              },
+                              "layout": {
+                                "improvedLayout": true
+                              },
+                              "physics": {
+                                "enabled": true,
+                                "barnesHut": { "gravitationalConstant": -8000, "springLength": 120, "springConstant": 0.04 }
+                              },
+                              "interaction": {
+                                "hover": true,
+                                "tooltipDelay": 100
+                              },
+                              "manipulation": { "enabled": false },
+                              "autoResize": true
+                            }
+                            ''')
+                            html = net.generate_html()
+                            # Inject CSS to remove white border/background
+                            dark_css = '''<style>
+                            body { background: #181818 !important; }
+                            #mynetwork { background: #181818 !important; border: none !important; }
+                            .vis-network { background: #181818 !important; }
+                            div { border: none !important; }
+                            </style>'''
+                            if '</head>' in html:
+                                html = html.replace('</head>', f'{dark_css}</head>')
+                            else:
+                                html = dark_css + html
+                            return html
 
-                if packet_sizes:
-                    size_df = pd.DataFrame({'Packet Size (bytes)': packet_sizes, 'Timestamp': timestamps})
-                    # Histogram
-                    st.markdown('**Histogram of Packet Sizes**')
-                    hist = alt.Chart(size_df).mark_bar().encode(
-                        alt.X('Packet Size (bytes):Q', bin=alt.Bin(maxbins=40), title='Packet Size (bytes)'),
-                        alt.Y('count()', title='Number of Packets'),
-                        tooltip=[alt.Tooltip('count()', title='Packets'), alt.Tooltip('Packet Size (bytes):Q', title='Size')]
-                    ).properties(height=350, title='Packet Size Distribution')
-                    st.altair_chart(hist.configure(
-                        background='#181818',
-                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
-                        legend=alt.LegendConfig(labelColor='white', titleColor='white'),
-                        title=alt.TitleConfig(color='white')
-                    ), use_container_width=True)
-                    # Boxplot (optional)
-                    st.markdown('**Boxplot of Packet Sizes**')
-                    box = alt.Chart(size_df).mark_boxplot(extent='min-max').encode(
-                        y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
-                        color=alt.value('#4FC3F7')
-                    ).properties(height=200, title='Packet Size Boxplot')
-                    st.altair_chart(box.configure(
-                        background='#181818',
-                        axis=alt.AxisConfig(labelColor='white', titleColor='white'),
-                        title=alt.TitleConfig(color='white')
-                    ), use_container_width=True)
-                    # Time series (optional)
-                    st.markdown('**Packet Size Over Time**')
-                    if size_df['Timestamp'].notnull().any():
-                        size_df['Timestamp'] = pd.to_datetime(size_df['Timestamp'])
-                        ts_chart = alt.Chart(size_df).mark_line(point=True).encode(
-                            x=alt.X('Timestamp:T', title='Time'),
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown('**Internal → External**')
+                            if internal_to_external:
+                                net1 = build_pyvis_graph(internal_to_external, 'Internal → External')
+                                components.html(net1, height=520, scrolling=False)
+                            else:
+                                st.info('No Internal → External flows found.')
+                        with col2:
+                            st.markdown('**External → Internal**')
+                            if external_to_internal:
+                                net2 = build_pyvis_graph(external_to_internal, 'External → Internal')
+                                components.html(net2, height=520, scrolling=False)
+                            else:
+                                st.info('No External → Internal flows found.')
+                        
+                    # --- Port Usage Analysis ---
+                    st.markdown('#### 🔢 Port Usage Analysis')
+
+                    # Extract relevant info for TCP/UDP packets
+                    tcp_udp_rows = []
+                    for pkt in cap:
+                        try:
+                            proto = getattr(pkt, 'transport_layer', None)
+                            if proto not in ('TCP', 'UDP'):
+                                continue
+                            src_ip = getattr(pkt, 'ip', None)
+                            src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
+                            dst_ip = getattr(pkt, 'ip', None)
+                            dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
+                            src_port = getattr(pkt, proto.lower(), None)
+                            src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, f'{proto.lower()}.srcport', None)
+                            dst_port = getattr(pkt, proto.lower(), None)
+                            dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, f'{proto.lower()}.dstport', None)
+                            if src_ip and dst_ip and src_port and dst_port:
+                                tcp_udp_rows.append({
+                                    'Protocol': proto,
+                                    'Source IP': src_ip,
+                                    'Destination IP': dst_ip,
+                                    'Source Port': str(src_port),
+                                    'Destination Port': str(dst_port)
+                                })
+                        except Exception:
+                            continue
+
+                    if tcp_udp_rows:
+                        port_df = pd.DataFrame(tcp_udp_rows)
+                        # Protocol filter
+                        proto_options = port_df['Protocol'].unique().tolist()
+                        proto_filter = st.multiselect('Protocol', proto_options, default=proto_options, key='port_proto_filter')
+                        filtered_port_df = port_df[port_df['Protocol'].isin(proto_filter)]
+                        # Toggle between source/destination port
+                        port_type = st.radio('Show Top Ports by:', ['Destination Port', 'Source Port'], horizontal=True)
+                        port_col = 'Destination Port' if port_type == 'Destination Port' else 'Source Port'
+                        # Aggregate counts
+                        agg = filtered_port_df.groupby(['Protocol', port_col]).size().reset_index(name='Packet Count')
+                        # Top N
+                        N = st.slider('Show Top N Ports', min_value=5, max_value=30, value=10, step=1)
+                        top_ports = agg.sort_values('Packet Count', ascending=False).head(N)
+                        # Bar chart
+                        bar_chart = alt.Chart(top_ports).mark_bar().encode(
+                            x=alt.X('Packet Count:Q', title='Packet Count'),
+                            y=alt.Y(f'{port_col}:N', title=port_col, sort='-x'),
+                            color=alt.Color('Protocol:N', legend=alt.Legend(title='Protocol')),
+                            tooltip=['Protocol', port_col, 'Packet Count']
+                        ).properties(height=400, title=f'Top {N} {port_type}s by Packet Count')
+                        st.altair_chart(bar_chart.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                        # Table
+                        st.markdown('##### Port Flow Table')
+                        flow_agg = filtered_port_df.groupby(['Source IP', 'Destination IP', 'Source Port', 'Destination Port', 'Protocol']).size().reset_index(name='Packet Count')
+                        st.dataframe(flow_agg, use_container_width=True, height=400)
+                    else:
+                        st.info('No TCP/UDP packets found for port analysis.')
+
+                    # --- Packet Size Analysis ---
+                    st.markdown('#### 📦 Packet Size Analysis')
+
+                    packet_sizes = []
+                    timestamps = []
+                    for pkt in cap:
+                        try:
+                            length = int(getattr(pkt, 'length', None) or getattr(pkt, 'frame_info', None) and getattr(pkt.frame_info, 'len', None) or getattr(pkt, 'frame.len', None) or 0)
+                            ts = getattr(pkt, 'sniff_time', None)
+                            if length > 0:
+                                packet_sizes.append(length)
+                                timestamps.append(ts)
+                        except Exception:
+                            continue
+
+                    if packet_sizes:
+                        size_df = pd.DataFrame({'Packet Size (bytes)': packet_sizes, 'Timestamp': timestamps})
+                        # Histogram
+                        st.markdown('**Histogram of Packet Sizes**')
+                        hist = alt.Chart(size_df).mark_bar().encode(
+                            alt.X('Packet Size (bytes):Q', bin=alt.Bin(maxbins=40), title='Packet Size (bytes)'),
+                            alt.Y('count()', title='Number of Packets'),
+                            tooltip=[alt.Tooltip('count()', title='Packets'), alt.Tooltip('Packet Size (bytes):Q', title='Size')]
+                        ).properties(height=350, title='Packet Size Distribution')
+                        st.altair_chart(hist.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                        # Boxplot (optional)
+                        st.markdown('**Boxplot of Packet Sizes**')
+                        box = alt.Chart(size_df).mark_boxplot(extent='min-max').encode(
                             y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
-                            tooltip=['Timestamp', 'Packet Size (bytes)']
-                        ).properties(height=250, title='Packet Size Over Time')
-                        st.altair_chart(ts_chart.configure(
+                            color=alt.value('#4FC3F7')
+                        ).properties(height=200, title='Packet Size Boxplot')
+                        st.altair_chart(box.configure(
                             background='#181818',
                             axis=alt.AxisConfig(labelColor='white', titleColor='white'),
                             title=alt.TitleConfig(color='white')
                         ), use_container_width=True)
-                    # Descriptive stats
-                    st.markdown('**Descriptive Statistics**')
-                    stats = {
-                        'Min Size': int(np.min(packet_sizes)),
-                        'Max Size': int(np.max(packet_sizes)),
-                        'Median': float(np.median(packet_sizes)),
-                        'Mean': float(np.mean(packet_sizes)),
-                        'Std Deviation': float(np.std(packet_sizes)),
-                        'Total Packets': len(packet_sizes)
-                    }
-                    st.dataframe(pd.DataFrame(stats, index=[0]), use_container_width=True)
-                else:
-                    st.info('No packet size data found in this PCAP.')
+                        # Time series (optional)
+                        st.markdown('**Packet Size Over Time**')
+                        if size_df['Timestamp'].notnull().any():
+                            size_df['Timestamp'] = pd.to_datetime(size_df['Timestamp'])
+                            ts_chart = alt.Chart(size_df).mark_line(point=True).encode(
+                                x=alt.X('Timestamp:T', title='Time'),
+                                y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
+                                tooltip=['Timestamp', 'Packet Size (bytes)']
+                            ).properties(height=250, title='Packet Size Over Time')
+                            st.altair_chart(ts_chart.configure(
+                                background='#181818',
+                                axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                                title=alt.TitleConfig(color='white')
+                            ), use_container_width=True)
+                        # Descriptive stats
+                        st.markdown('**Descriptive Statistics**')
+                        stats = {
+                            'Min Size': int(np.min(packet_sizes)),
+                            'Max Size': int(np.max(packet_sizes)),
+                            'Median': float(np.median(packet_sizes)),
+                            'Mean': float(np.mean(packet_sizes)),
+                            'Std Deviation': float(np.std(packet_sizes)),
+                            'Total Packets': len(packet_sizes)
+                        }
+                        st.dataframe(pd.DataFrame(stats, index=[0]), use_container_width=True)
+                    else:
+                        st.info('No packet size data found in this PCAP.')
 
-                # --- Prepare for IOC Enrichment ---
-                st.markdown('#### 🔎 IOC Enrichment for Network Flows')
-                # Collect unique IOCs (IPs/domains/FQDNs/DNS names)
-                ioc_candidates = set()
-                for col in ['Source IP', 'Destination IP', 'Host/Domain']:
-                    ioc_candidates.update(filtered_df[col].dropna().astype(str).tolist())
-                # Remove empty/invalid
-                ioc_candidates = set(ioc for ioc in ioc_candidates if ioc and ioc != 'None' and ioc != '-')
-                # Detect type and filter for IP, Domain, FQDN, DNS
-                ioc_list = []
-                for ioc in ioc_candidates:
-                    t = detect_type(ioc)
-                    if t in ("IP", "Domain"):
-                        ioc_list.append(ioc)
-                if ioc_list:
-                    enrich_button = st.button('Run IOC Enrichment', key='pcap_enrich')
-                    if enrich_button:
-                        st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
-                        
-                        # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
-                        # For each enrichment block, do this:
-
-                        # Example for one enrichment block:
-                        keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
-                        @lru_cache(maxsize=512)
-                        def enrich_all(ioc):
-                            result = {"IOC": ioc, "Type": detect_type(ioc)}
-                            result.update(enrich_otx(ioc, keys=keys))
-                            result.update(enrich_vt(ioc, keys=keys))
-                            result.update(enrich_greynoise(ioc, keys=keys))
-                            try:
-                                from utils.api_clients import enrich_ipinfo
-                                result.update(enrich_ipinfo(ioc, keys=keys))
-                            except ImportError:
-                                pass
-                            return result
-                        
-                        # Parallel enrichment with progress bar
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        enriched = []
-                        
-                        with ThreadPoolExecutor(max_workers=10) as executor:
-                            # Submit all tasks
-                            future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                    # --- Prepare for IOC Enrichment ---
+                    st.markdown('#### 🔎 IOC Enrichment for Network Flows')
+                    # Collect unique IOCs (IPs/domains/FQDNs/DNS names)
+                    ioc_candidates = set()
+                    for col in ['Source IP', 'Destination IP', 'Host/Domain']:
+                        ioc_candidates.update(filtered_df[col].dropna().astype(str).tolist())
+                    # Remove empty/invalid
+                    ioc_candidates = set(ioc for ioc in ioc_candidates if ioc and ioc != 'None' and ioc != '-')
+                    # Detect type and filter for IP, Domain, FQDN, DNS
+                    ioc_list = []
+                    for ioc in ioc_candidates:
+                        t = detect_type(ioc)
+                        if t in ("IP", "Domain"):
+                            ioc_list.append(ioc)
+                    if ioc_list:
+                        enrich_button = st.button('Run IOC Enrichment', key='pcap_enrich')
+                        if enrich_button:
+                            st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
                             
-                            # Process completed tasks with progress updates
-                            for i, future in enumerate(future_to_ioc):
+                            # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                            # For each enrichment block, do this:
+
+                            # Example for one enrichment block:
+                            keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
+                            @lru_cache(maxsize=512)
+                            def enrich_all(ioc):
+                                result = {"IOC": ioc, "Type": detect_type(ioc)}
+                                result.update(enrich_otx(ioc, keys=keys))
+                                result.update(enrich_vt(ioc, keys=keys))
+                                result.update(enrich_greynoise(ioc, keys=keys))
                                 try:
-                                    result = future.result()
-                                    enriched.append(result)
-                                    progress = (i + 1) / len(ioc_list)
-                                    progress_bar.progress(progress)
-                                    status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
-                                except Exception as e:
-                                    st.warning(f"Error enriching IOC: {e}")
-                                    continue
+                                    from utils.api_clients import enrich_ipinfo
+                                    result.update(enrich_ipinfo(ioc, keys=keys))
+                                except ImportError:
+                                    pass
+                                return result
+                            
+                            # Parallel enrichment with progress bar
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            enriched = []
+                            
+                            with ThreadPoolExecutor(max_workers=10) as executor:
+                                # Submit all tasks
+                                future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                                
+                                # Process completed tasks with progress updates
+                                for i, future in enumerate(future_to_ioc):
+                                    try:
+                                        result = future.result()
+                                        enriched.append(result)
+                                        progress = (i + 1) / len(ioc_list)
+                                        progress_bar.progress(progress)
+                                        status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                    except Exception as e:
+                                        st.warning(f"Error enriching IOC: {e}")
+                                        continue
+                            
+                            # Clear progress indicators
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            df_enrich = pd.DataFrame(enriched)
+                            
+                            # Add navigation links
+                            df_enrich['VT'] = df_enrich.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['IOC']}", axis=1)
+                            df_enrich['OTX'] = df_enrich.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['IOC']}", axis=1)
+                            df_enrich['GN'] = df_enrich.apply(
+                                lambda row: f"https://www.greynoise.io/viz/ip/{row['IOC']}" if 'ip' in row['Type'].lower() else None,
+                                axis=1
+                            )
+                            
+                            # Define column configuration for links
+                            column_config = {
+                                "IOC": st.column_config.TextColumn(help="The original IOC (IP, domain, or hash)"),
+                                "Type": st.column_config.TextColumn(help="Automatically detected type of the indicator"),
+                                "VT": st.column_config.LinkColumn(
+                                    "VirusTotal",
+                                    display_text="VT",
+                                    help="Pivots to the VirusTotal report"
+                                ),
+                                "OTX": st.column_config.LinkColumn(
+                                    "OTX",
+                                    display_text="OTX",
+                                    help="Pivots to the OTX report"
+                                ),
+                                "GN": st.column_config.LinkColumn(
+                                    "GreyNoise",
+                                    display_text="GN",
+                                    help="Pivots to the GreyNoise report"
+                                ),
+                            }
+                            
+                            # Reorder columns to show links first
+                            final_column_order = ['IOC', 'Type', 'VT', 'OTX', 'GN'] + [col for col in df_enrich.columns if col not in ['IOC', 'Type', 'VT', 'OTX', 'GN']]
+                            
+                            # Display enrichment results
+                            st.markdown('##### IOC Enrichment Results')
+                            st.dataframe(df_enrich[final_column_order], use_container_width=True, column_config=column_config)
+                    else:
+                        st.info('No valid IPs or domains found for enrichment.')
+                except Exception as e:
+                    st.error(f"Error parsing PCAP: {e}")
+            else:
+                st.warning("TShark is not available on this system. Falling back to scapy for basic PCAP parsing. Some features (like HTTP/DNS extraction) may be missing.")
+                try:
+                    from scapy.all import rdpcap, IP, TCP, UDP
+                    import datetime
+                    st.info("Parsing network flows with scapy...")
+                    packets = rdpcap(tmpfile.name)
+                    flows = []
+                    for pkt in packets:
+                        if IP in pkt:
+                            proto = "TCP" if TCP in pkt else "UDP" if UDP in pkt else "Other"
+                            src_ip = pkt[IP].src
+                            dst_ip = pkt[IP].dst
+                            src_port = pkt[TCP].sport if TCP in pkt else (pkt[UDP].sport if UDP in pkt else None)
+                            dst_port = pkt[TCP].dport if TCP in pkt else (pkt[UDP].dport if UDP in pkt else None)
+                            ts = datetime.datetime.fromtimestamp(float(pkt.time))  # <-- fix here
+                            flows.append({
+                                'Timestamp': ts,
+                                'Protocol': proto,
+                                'Source IP': src_ip,
+                                'Source Port': src_port,
+                                'Destination IP': dst_ip,
+                                'Destination Port': dst_port,
+                                'Length': len(pkt),
+                                'Host/Domain': None,
+                                'URI': None,
+                                'User-Agent': None,
+                            })
+                    if not flows:
+                        st.warning("No flows/packets extracted from the PCAP file.")
+                    else:
+                        df = pd.DataFrame(flows)
+                        # --- Filters ---
+                        st.markdown('#### Filters')
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            proto_options = df['Protocol'].dropna().unique().tolist()
+                            filter_proto = st.multiselect('Protocol', proto_options, default=proto_options)
+                        with col2:
+                            dst_ip_options = df['Destination IP'].dropna().unique().tolist()
+                            filter_dst_ip = st.multiselect('Destination IP', dst_ip_options, default=dst_ip_options)
+                        with col3:
+                            filter_dns_http = st.checkbox('Show only DNS/HTTP traffic', value=False)
+                        filtered_df = df.copy()
+                        if filter_proto:
+                            filtered_df = filtered_df[filtered_df['Protocol'].isin(filter_proto)]
+                        if filter_dst_ip:
+                            filtered_df = filtered_df[filtered_df['Destination IP'].isin(filter_dst_ip)]
+                        if filter_dns_http:
+                            filtered_df = filtered_df[filtered_df['Protocol'].isin(['HTTP', 'DNS'])]
+                        st.markdown('#### Network Flows Table')
+                        st.dataframe(filtered_df, use_container_width=True)
+                        # --- Timeline Chart ---
+                        st.markdown('#### 📈 Timeline of Connections')
+                        if not filtered_df.empty:
+                            timeline_df = filtered_df.copy()
+                            timeline_df['Minute'] = timeline_df['Timestamp'].dt.floor('min')
+                            timeline_counts = timeline_df.groupby('Minute').size().reset_index(name='Count')
+                            chart = alt.Chart(timeline_counts).mark_line(point=True).encode(
+                                x=alt.X('Minute:T', title='Time'),
+                                y=alt.Y('Count:Q', title='Number of Flows'),
+                                tooltip=['Minute', 'Count']
+                            ).properties(height=300)
+                            st.altair_chart(chart, use_container_width=True)
+                        # --- Protocol Distribution Charts ---
+                        st.markdown('#### 🥧 Protocol Distribution')
                         
-                        # Clear progress indicators
-                        progress_bar.empty()
-                        status_text.empty()
+                        # Calculate protocol statistics
+                        proto_counts = filtered_df['Protocol'].value_counts().reset_index()
+                        proto_counts.columns = ['Protocol', 'Count']
+                        total_packets = proto_counts['Count'].sum()
+                        proto_counts['Percentage'] = (proto_counts['Count'] / total_packets * 100).round(1)
+                        proto_counts['Label'] = proto_counts['Protocol'] + ' (' + proto_counts['Percentage'].astype(str) + '%)'
                         
-                        df_enrich = pd.DataFrame(enriched)
+                        # Bar chart showing percentages
+                        bar = alt.Chart(proto_counts).mark_bar().encode(
+                            x=alt.X('Percentage:Q', title='Percentage (%)'),
+                            y=alt.Y('Protocol:N', title='Protocol', sort='-x'),
+                            color=alt.Color('Protocol:N', legend=None),
+                            tooltip=[
+                                alt.Tooltip('Protocol:N', title='Protocol'),
+                                alt.Tooltip('Count:Q', title='Count'),
+                                alt.Tooltip('Percentage:Q', title='Percentage', format='.1f')
+                            ]
+                        ).properties(height=400, title='Protocol Distribution by Percentage')
                         
-                        # Add navigation links
-                        df_enrich['VT'] = df_enrich.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['IOC']}", axis=1)
-                        df_enrich['OTX'] = df_enrich.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['IOC']}", axis=1)
-                        df_enrich['GN'] = df_enrich.apply(
-                            lambda row: f"https://www.greynoise.io/viz/ip/{row['IOC']}" if 'ip' in row['Type'].lower() else None,
-                            axis=1
+                        # Add percentage labels on bars
+                        bar_text = alt.Chart(proto_counts).mark_text(
+                            align='left',
+                            baseline='middle',
+                            dx=5,
+                            fontSize=11,
+                            fontWeight='bold'
+                        ).encode(
+                            x=alt.X('Percentage:Q'),
+                            y=alt.Y('Protocol:N', sort='-x'),
+                            text=alt.Text('Percentage:Q', format='.1f')
                         )
                         
-                        # Define column configuration for links
-                        column_config = {
-                            "IOC": st.column_config.TextColumn(help="The original IOC (IP, domain, or hash)"),
-                            "Type": st.column_config.TextColumn(help="Automatically detected type of the indicator"),
-                            "VT": st.column_config.LinkColumn(
-                                "VirusTotal",
-                                display_text="VT",
-                                help="Pivots to the VirusTotal report"
-                            ),
-                            "OTX": st.column_config.LinkColumn(
-                                "OTX",
-                                display_text="OTX",
-                                help="Pivots to the OTX report"
-                            ),
-                            "GN": st.column_config.LinkColumn(
-                                "GreyNoise",
-                                display_text="GN",
-                                help="Pivots to the GreyNoise report"
-                            ),
+                        bar_chart = alt.layer(bar, bar_text)
+                        st.altair_chart(bar_chart, use_container_width=True)
+                        
+                        # Summary statistics
+                        st.markdown('##### 📊 Protocol Summary')
+                        summary_col1, summary_col2, summary_col3 = st.columns(3)
+                        with summary_col1:
+                            st.metric("Total Packets", f"{total_packets:,}")
+                        with summary_col2:
+                            st.metric("Unique Protocols", len(proto_counts))
+                        with summary_col3:
+                            top_protocol = proto_counts.iloc[0]
+                            st.metric("Most Common", f"{top_protocol['Protocol']} ({top_protocol['Percentage']:.1f}%)")
+                        # --- Source-Destination Graph (Improved: Internal/External Separation) ---
+                        st.markdown('#### 🌐 Source-Destination Graphs (Internal ↔ External)')
+                        def is_internal(ip):
+                            try:
+                                return ipaddress.ip_address(ip).is_private
+                            except Exception:
+                                return False
+
+                        # Prepare flows for graphing
+                        flow_counts = {}
+                        for _, row in filtered_df.iterrows():
+                            src = row['Source IP']
+                            dst = row['Destination IP']
+                            if src and dst and src != dst:
+                                key = (src, dst)
+                                flow_counts[key] = flow_counts.get(key, 0) + 1
+
+                        # Group flows
+                        internal_to_external = {}
+                        external_to_internal = {}
+                        for (src, dst), count in flow_counts.items():
+                            src_internal = is_internal(src)
+                            dst_internal = is_internal(dst)
+                            if src_internal and not dst_internal:
+                                internal_to_external[(src, dst)] = count
+                            elif not src_internal and dst_internal:
+                                external_to_internal[(src, dst)] = count
+
+                        # Helper to build and render a pyvis graph
+                        def build_pyvis_graph(flow_dict, direction_label):
+                            net = Network(height='500px', width='100%', bgcolor='#181818', font_color='white', directed=True)
+                            node_types = {}
+                            for (src, dst), count in flow_dict.items():
+                                for ip, is_int in [(src, is_internal(src)), (dst, is_internal(dst))]:
+                                    if ip not in node_types:
+                                        node_types[ip] = is_int
+                            for ip, is_int in node_types.items():
+                                color = '#4FC3F7' if is_int else '#FF7043'  # blue for internal, orange for external
+                                net.add_node(ip, label=ip, color=color, font={'color': 'white'})
+                            max_count = max(flow_dict.values()) if flow_dict else 1
+                            for (src, dst), count in flow_dict.items():
+                                width = 1 + 6 * (count / max_count)  # 1-7 px
+                                net.add_edge(src, dst, value=count, title=f"{src} → {dst}<br>Packets: {count}", width=width, color='#BDBDBD')
+                            net.set_options('''
+                            var options = {
+                              "nodes": {
+                                "borderWidth": 2,
+                                "shadow": true,
+                                "font": { "color": "white", "size": 16 }
+                              },
+                              "edges": {
+                                "color": { "color": "#BDBDBD" },
+                                "smooth": true,
+                                "arrows": { "to": { "enabled": true, "scaleFactor": 0.7 } },
+                                "shadow": true
+                              },
+                              "layout": {
+                                "improvedLayout": true
+                              },
+                              "physics": {
+                                "enabled": true,
+                                "barnesHut": { "gravitationalConstant": -8000, "springLength": 120, "springConstant": 0.04 }
+                              },
+                              "interaction": {
+                                "hover": true,
+                                "tooltipDelay": 100
+                              },
+                              "manipulation": { "enabled": false },
+                              "autoResize": true
+                            }
+                            ''')
+                            html = net.generate_html()
+                            # Inject CSS to remove white border/background
+                            dark_css = '''<style>
+                            body { background: #181818 !important; }
+                            #mynetwork { background: #181818 !important; border: none !important; }
+                            .vis-network { background: #181818 !important; }
+                            div { border: none !important; }
+                            </style>'''
+                            if '</head>' in html:
+                                html = html.replace('</head>', f'{dark_css}</head>')
+                            else:
+                                html = dark_css + html
+                            return html
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown('**Internal → External**')
+                            if internal_to_external:
+                                net1 = build_pyvis_graph(internal_to_external, 'Internal → External')
+                                components.html(net1, height=520, scrolling=False)
+                            else:
+                                st.info('No Internal → External flows found.')
+                        with col2:
+                            st.markdown('**External → Internal**')
+                            if external_to_internal:
+                                net2 = build_pyvis_graph(external_to_internal, 'External → Internal')
+                                components.html(net2, height=520, scrolling=False)
+                            else:
+                                st.info('No External → Internal flows found.')
+                        
+                    # --- Port Usage Analysis ---
+                    st.markdown('#### 🔢 Port Usage Analysis')
+
+                    # Extract relevant info for TCP/UDP packets
+                    tcp_udp_rows = []
+                    for pkt in packets:
+                        try:
+                            proto = getattr(pkt, 'transport_layer', None)
+                            if proto not in ('TCP', 'UDP'):
+                                continue
+                            src_ip = getattr(pkt, 'ip', None)
+                            src_ip = src_ip.src if src_ip and hasattr(src_ip, 'src') else getattr(pkt, 'ip.src', None)
+                            dst_ip = getattr(pkt, 'ip', None)
+                            dst_ip = dst_ip.dst if dst_ip and hasattr(dst_ip, 'dst') else getattr(pkt, 'ip.dst', None)
+                            src_port = getattr(pkt, proto.lower(), None)
+                            src_port = src_port.srcport if src_port and hasattr(src_port, 'srcport') else getattr(pkt, f'{proto.lower()}.srcport', None)
+                            dst_port = getattr(pkt, proto.lower(), None)
+                            dst_port = dst_port.dstport if dst_port and hasattr(dst_port, 'dstport') else getattr(pkt, f'{proto.lower()}.dstport', None)
+                            if src_ip and dst_ip and src_port and dst_port:
+                                tcp_udp_rows.append({
+                                    'Protocol': proto,
+                                    'Source IP': src_ip,
+                                    'Destination IP': dst_ip,
+                                    'Source Port': str(src_port),
+                                    'Destination Port': str(dst_port)
+                                })
+                        except Exception:
+                            continue
+
+                    if tcp_udp_rows:
+                        port_df = pd.DataFrame(tcp_udp_rows)
+                        # Protocol filter
+                        proto_options = port_df['Protocol'].unique().tolist()
+                        proto_filter = st.multiselect('Protocol', proto_options, default=proto_options, key='port_proto_filter')
+                        filtered_port_df = port_df[port_df['Protocol'].isin(proto_filter)]
+                        # Toggle between source/destination port
+                        port_type = st.radio('Show Top Ports by:', ['Destination Port', 'Source Port'], horizontal=True)
+                        port_col = 'Destination Port' if port_type == 'Destination Port' else 'Source Port'
+                        # Aggregate counts
+                        agg = filtered_port_df.groupby(['Protocol', port_col]).size().reset_index(name='Packet Count')
+                        # Top N
+                        N = st.slider('Show Top N Ports', min_value=5, max_value=30, value=10, step=1)
+                        top_ports = agg.sort_values('Packet Count', ascending=False).head(N)
+                        # Bar chart
+                        bar_chart = alt.Chart(top_ports).mark_bar().encode(
+                            x=alt.X('Packet Count:Q', title='Packet Count'),
+                            y=alt.Y(f'{port_col}:N', title=port_col, sort='-x'),
+                            color=alt.Color('Protocol:N', legend=alt.Legend(title='Protocol')),
+                            tooltip=['Protocol', port_col, 'Packet Count']
+                        ).properties(height=400, title=f'Top {N} {port_type}s by Packet Count')
+                        st.altair_chart(bar_chart.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                        # Table
+                        st.markdown('##### Port Flow Table')
+                        flow_agg = filtered_port_df.groupby(['Source IP', 'Destination IP', 'Source Port', 'Destination Port', 'Protocol']).size().reset_index(name='Packet Count')
+                        st.dataframe(flow_agg, use_container_width=True, height=400)
+                    else:
+                        st.info('No TCP/UDP packets found for port analysis.')
+
+                    # --- Packet Size Analysis ---
+                    st.markdown('#### 📦 Packet Size Analysis')
+
+                    packet_sizes = []
+                    timestamps = []
+                    for pkt in packets:
+                        try:
+                            length = int(getattr(pkt, 'length', None) or getattr(pkt, 'frame_info', None) and getattr(pkt.frame_info, 'len', None) or getattr(pkt, 'frame.len', None) or 0)
+                            ts = getattr(pkt, 'sniff_time', None)
+                            if length > 0:
+                                packet_sizes.append(length)
+                                timestamps.append(ts)
+                        except Exception:
+                            continue
+
+                    if packet_sizes:
+                        size_df = pd.DataFrame({'Packet Size (bytes)': packet_sizes, 'Timestamp': timestamps})
+                        # Histogram
+                        st.markdown('**Histogram of Packet Sizes**')
+                        hist = alt.Chart(size_df).mark_bar().encode(
+                            alt.X('Packet Size (bytes):Q', bin=alt.Bin(maxbins=40), title='Packet Size (bytes)'),
+                            alt.Y('count()', title='Number of Packets'),
+                            tooltip=[alt.Tooltip('count()', title='Packets'), alt.Tooltip('Packet Size (bytes):Q', title='Size')]
+                        ).properties(height=350, title='Packet Size Distribution')
+                        st.altair_chart(hist.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            legend=alt.LegendConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                        # Boxplot (optional)
+                        st.markdown('**Boxplot of Packet Sizes**')
+                        box = alt.Chart(size_df).mark_boxplot(extent='min-max').encode(
+                            y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
+                            color=alt.value('#4FC3F7')
+                        ).properties(height=200, title='Packet Size Boxplot')
+                        st.altair_chart(box.configure(
+                            background='#181818',
+                            axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                            title=alt.TitleConfig(color='white')
+                        ), use_container_width=True)
+                        # Time series (optional)
+                        st.markdown('**Packet Size Over Time**')
+                        if size_df['Timestamp'].notnull().any():
+                            size_df['Timestamp'] = pd.to_datetime(size_df['Timestamp'])
+                            ts_chart = alt.Chart(size_df).mark_line(point=True).encode(
+                                x=alt.X('Timestamp:T', title='Time'),
+                                y=alt.Y('Packet Size (bytes):Q', title='Packet Size (bytes)'),
+                                tooltip=['Timestamp', 'Packet Size (bytes)']
+                            ).properties(height=250, title='Packet Size Over Time')
+                            st.altair_chart(ts_chart.configure(
+                                background='#181818',
+                                axis=alt.AxisConfig(labelColor='white', titleColor='white'),
+                                title=alt.TitleConfig(color='white')
+                            ), use_container_width=True)
+                        # Descriptive stats
+                        st.markdown('**Descriptive Statistics**')
+                        stats = {
+                            'Min Size': int(np.min(packet_sizes)),
+                            'Max Size': int(np.max(packet_sizes)),
+                            'Median': float(np.median(packet_sizes)),
+                            'Mean': float(np.mean(packet_sizes)),
+                            'Std Deviation': float(np.std(packet_sizes)),
+                            'Total Packets': len(packet_sizes)
                         }
-                        
-                        # Reorder columns to show links first
-                        final_column_order = ['IOC', 'Type', 'VT', 'OTX', 'GN'] + [col for col in df_enrich.columns if col not in ['IOC', 'Type', 'VT', 'OTX', 'GN']]
-                        
-                        # Display enrichment results
-                        st.markdown('##### IOC Enrichment Results')
-                        st.dataframe(df_enrich[final_column_order], use_container_width=True, column_config=column_config)
-                else:
-                    st.info('No valid IPs or domains found for enrichment.')
-            except Exception as e:
-                st.error(f"Error parsing PCAP: {e}")
+                        st.dataframe(pd.DataFrame(stats, index=[0]), use_container_width=True)
+                    else:
+                        st.info('No packet size data found in this PCAP.')
+
+                    # --- Prepare for IOC Enrichment ---
+                    st.markdown('#### 🔎 IOC Enrichment for Network Flows')
+                    # Collect unique IOCs (IPs/domains/FQDNs/DNS names)
+                    ioc_candidates = set()
+                    for col in ['Source IP', 'Destination IP', 'Host/Domain']:
+                        ioc_candidates.update(filtered_df[col].dropna().astype(str).tolist())
+                    # Remove empty/invalid
+                    ioc_candidates = set(ioc for ioc in ioc_candidates if ioc and ioc != 'None' and ioc != '-')
+                    # Detect type and filter for IP, Domain, FQDN, DNS
+                    ioc_list = []
+                    for ioc in ioc_candidates:
+                        t = detect_type(ioc)
+                        if t in ("IP", "Domain"):
+                            ioc_list.append(ioc)
+                    if ioc_list:
+                        enrich_button = st.button('Run IOC Enrichment', key='pcap_enrich')
+                        if enrich_button:
+                            st.write(f"Enriching {len(ioc_list)} unique IOCs (IPs/domains)...")
+                            
+                            # Before any ThreadPoolExecutor usage, extract keys ONCE in main thread
+                            # For each enrichment block, do this:
+
+                            # Example for one enrichment block:
+                            keys = st.session_state.get('api_keys', {})  # Extract keys ONCE in main thread
+                            @lru_cache(maxsize=512)
+                            def enrich_all(ioc):
+                                result = {"IOC": ioc, "Type": detect_type(ioc)}
+                                result.update(enrich_otx(ioc, keys=keys))
+                                result.update(enrich_vt(ioc, keys=keys))
+                                result.update(enrich_greynoise(ioc, keys=keys))
+                                try:
+                                    from utils.api_clients import enrich_ipinfo
+                                    result.update(enrich_ipinfo(ioc, keys=keys))
+                                except ImportError:
+                                    pass
+                                return result
+                            
+                            # Parallel enrichment with progress bar
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            enriched = []
+                            
+                            with ThreadPoolExecutor(max_workers=10) as executor:
+                                # Submit all tasks
+                                future_to_ioc = {executor.submit(enrich_all, ioc): ioc for ioc in ioc_list}
+                                
+                                # Process completed tasks with progress updates
+                                for i, future in enumerate(future_to_ioc):
+                                    try:
+                                        result = future.result()
+                                        enriched.append(result)
+                                        progress = (i + 1) / len(ioc_list)
+                                        progress_bar.progress(progress)
+                                        status_text.text(f"Enriching IOCs... {i + 1}/{len(ioc_list)} ({progress:.1%})")
+                                    except Exception as e:
+                                        st.warning(f"Error enriching IOC: {e}")
+                                        continue
+                            
+                            # Clear progress indicators
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            df_enrich = pd.DataFrame(enriched)
+                            
+                            # Add navigation links
+                            df_enrich['VT'] = df_enrich.apply(lambda row: f"https://www.virustotal.com/gui/search/{row['IOC']}", axis=1)
+                            df_enrich['OTX'] = df_enrich.apply(lambda row: f"https://otx.alienvault.com/indicator/{row['Type'].lower()}/{row['IOC']}", axis=1)
+                            df_enrich['GN'] = df_enrich.apply(
+                                lambda row: f"https://www.greynoise.io/viz/ip/{row['IOC']}" if 'ip' in row['Type'].lower() else None,
+                                axis=1
+                            )
+                            
+                            # Define column configuration for links
+                            column_config = {
+                                "IOC": st.column_config.TextColumn(help="The original IOC (IP, domain, or hash)"),
+                                "Type": st.column_config.TextColumn(help="Automatically detected type of the indicator"),
+                                "VT": st.column_config.LinkColumn(
+                                    "VirusTotal",
+                                    display_text="VT",
+                                    help="Pivots to the VirusTotal report"
+                                ),
+                                "OTX": st.column_config.LinkColumn(
+                                    "OTX",
+                                    display_text="OTX",
+                                    help="Pivots to the OTX report"
+                                ),
+                                "GN": st.column_config.LinkColumn(
+                                    "GreyNoise",
+                                    display_text="GN",
+                                    help="Pivots to the GreyNoise report"
+                                ),
+                            }
+                            
+                            # Reorder columns to show links first
+                            final_column_order = ['IOC', 'Type', 'VT', 'OTX', 'GN'] + [col for col in df_enrich.columns if col not in ['IOC', 'Type', 'VT', 'OTX', 'GN']]
+                            
+                            # Display enrichment results
+                            st.markdown('##### IOC Enrichment Results')
+                            st.dataframe(df_enrich[final_column_order], use_container_width=True, column_config=column_config)
+                    else:
+                        st.info('No valid IPs or domains found for enrichment.')
+                except Exception as e:
+                    st.error(f"Error parsing PCAP with scapy: {e}")
     elif file_extension in ["json", "jsonl"]:
         st.markdown('#### 🗂️ JSON/JSONL Viewer')
         try:
